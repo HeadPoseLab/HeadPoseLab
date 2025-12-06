@@ -1,0 +1,7 @@
+torch~=2.3.0
+torchvision~=0.18.0
+numpy~=1.26.0
+pillow~=10.0.0
+pyyaml~=6.0.1
+tqdm~=4.66.0
+scikit-learn~=1.5.0

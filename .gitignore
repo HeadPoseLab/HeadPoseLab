@@ -1,0 +1,25 @@
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual envs
+.env
+.venv/
+venv/
+env/
+
+# Project artifacts
+pose_model/data/**
+!pose_model/data/.gitkeep
+checkpoints/
+*.pt
+*.pth
+runs/
+logs/

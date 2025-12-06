@@ -1,0 +1,35 @@
+# Data
+data_root: ./data
+sequence_length: 16
+overlap: true  # use sliding window with stride 1 to enlarge samples
+train_ratio: 0.7
+val_ratio: 0.15
+seed: 42
+image_size: 128
+
+# Dataloader
+batch_size: 8
+num_workers: 4
+
+# Model
+model:
+  backbone: simple_cnn  # options: simple_cnn, resnet18
+  feature_dim: 128
+  lstm_hidden: 128
+  lstm_layers: 1
+  dropout: 0.1
+  freeze_backbone: false
+
+# Optimization
+train:
+  epochs: 20
+  lr: 0.001
+  weight_decay: 0.0001
+  grad_clip: 5.0
+  device: auto  # auto, cpu, or cuda
+  save_dir: ./checkpoints
+  log_interval: 10
+
+# Evaluation
+eval:
+  checkpoint: ./checkpoints/best.pt
