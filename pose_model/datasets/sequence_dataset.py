@@ -32,6 +32,7 @@ class PoseSequenceDataset(Dataset):
         seed: int = 42,
         image_size: int = 128,
         transform=None,
+        filter_cfg: dict | None = None,
     ):
         super().__init__()
         self.data_root = Path(data_root)
@@ -39,6 +40,7 @@ class PoseSequenceDataset(Dataset):
         self.sequence_length = sequence_length
         self.overlap = overlap
         self.image_size = image_size
+        self.filter_cfg = filter_cfg or {}
         self.transform = transform or transforms.Compose(
             [
                 transforms.Resize((image_size, image_size)),
@@ -55,6 +57,8 @@ class PoseSequenceDataset(Dataset):
 
         self.samples: List[Tuple[List[Path], List[int]]] = []
         self.class_counts: Counter[int] = Counter()
+        self.primary_counts: Counter[int] = Counter()
+        self.primary_labels: List[int] = []
         self.sample_weights: List[float] = []
         self._build_index(train_ratio, val_ratio, seed)
 
@@ -77,7 +81,7 @@ class PoseSequenceDataset(Dataset):
             raise ValueError(f"Unknown mode: {self.mode}")
 
         stride = 1 if self.overlap else self.sequence_length
-        class_counter: Counter[int] = Counter()
+        primary_labels: List[int] = []
         for person_dir in target:
             entries = self._read_person_entries(person_dir)
             if len(entries) < self.sequence_length:
@@ -86,16 +90,44 @@ class PoseSequenceDataset(Dataset):
                 window = entries[start : start + self.sequence_length]
                 paths, labels = zip(*window)
                 labels_zero_based = [lbl - 1 for lbl in labels]
-                class_counter.update(labels_zero_based)
+                primary_labels.append(self._primary_label(labels_zero_based))
                 self.samples.append((list(paths), labels_zero_based))
+
+        if self.filter_cfg.get("enabled"):
+            factor = float(self.filter_cfg.get("max_factor", 3.0))
+            rng = random.Random(self.filter_cfg.get("seed", seed))
+            initial_counts = Counter(primary_labels)
+            if initial_counts:
+                min_count = min(initial_counts.values())
+                max_per_class = max(int(min_count * factor), min_count)
+                indices = list(range(len(self.samples)))
+                rng.shuffle(indices)
+                kept_samples: List[Tuple[List[Path], List[int]]] = []
+                kept_primary: List[int] = []
+                kept_counter: Counter[int] = Counter()
+                for idx in indices:
+                    lbl = primary_labels[idx]
+                    if kept_counter[lbl] >= max_per_class:
+                        continue
+                    kept_counter[lbl] += 1
+                    kept_samples.append(self.samples[idx])
+                    kept_primary.append(lbl)
+                self.samples = kept_samples
+                primary_labels = kept_primary
 
         if not self.samples:
             raise RuntimeError(f"No sequences created for mode={self.mode}. Check data volume and sequence_length.")
-        self.class_counts = class_counter
-        if self.class_counts:
-            for _, labels in self.samples:
-                weights = [1.0 / max(1, self.class_counts[label]) for label in labels]
-                self.sample_weights.append(sum(weights) / len(weights))
+        self.primary_labels = primary_labels
+        self.primary_counts = Counter(primary_labels)
+
+        frame_counter: Counter[int] = Counter()
+        for _, labels in self.samples:
+            frame_counter.update(labels)
+        self.class_counts = frame_counter
+
+        if self.primary_counts:
+            for lbl in self.primary_labels:
+                self.sample_weights.append(1.0 / max(1, self.primary_counts[lbl]))
 
     @staticmethod
     def _read_person_entries(person_dir: Path) -> List[Tuple[Path, int]]:
@@ -117,6 +149,14 @@ class PoseSequenceDataset(Dataset):
                 img_path = person_dir / "images" / filename
                 entries.append((img_path, label))
         return entries
+
+    @staticmethod
+    def _primary_label(labels: List[int]) -> int:
+        """Choose a representative label for a sequence for filtering/sampling."""
+        counter = Counter(labels)
+        if counter:
+            return counter.most_common(1)[0][0]
+        return labels[len(labels) // 2] if labels else 0
 
     def __len__(self):
         return len(self.samples)

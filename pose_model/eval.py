@@ -100,6 +100,7 @@ def main():
         val_ratio=cfg["val_ratio"],
         seed=cfg["seed"],
         image_size=cfg["image_size"],
+        filter_cfg=cfg.get("filter", {}),
     )
     loader = DataLoader(dataset, batch_size=cfg["batch_size"], shuffle=False, num_workers=cfg["num_workers"])
 
