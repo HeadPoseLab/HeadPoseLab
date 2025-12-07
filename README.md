@@ -31,7 +31,7 @@ data/
 ## 准备环境
 ```bash
 cd pose_model
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv && .\.venv\Scripts\Activate
 pip install -r requirements.txt
 ```
 

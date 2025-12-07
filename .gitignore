@@ -21,5 +21,6 @@ pose_model/data/**
 checkpoints/
 *.pt
 *.pth
+*.png
 runs/
 logs/
