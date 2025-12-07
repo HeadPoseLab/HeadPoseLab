@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 import yaml
 from torch import nn, optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from pose_model.datasets.sequence_dataset import PoseSequenceDataset, NUM_CLASSES
 from pose_model.models.cnn_lstm import CNNLSTMModel
 from pose_model.utils.logger import get_logger
+from pose_model.utils.losses import FocalLoss
 from pose_model.utils.metrics import sequence_accuracy, sequence_f1
 from pose_model.utils.seed import set_seed
 
@@ -36,6 +37,20 @@ def resolve_device(preference: str):
     if preference == "cuda":
         return torch.device("cuda")
     return torch.device("cpu")
+
+
+def compute_class_weights(counts, loss_cfg, device):
+    mode = loss_cfg.get("class_weights", "none")
+    if isinstance(mode, list):
+        return torch.tensor(mode, dtype=torch.float, device=device)
+    if isinstance(mode, str):
+        mode_lower = mode.lower()
+        if mode_lower == "none":
+            return None
+        if mode_lower == "auto":
+            counts_tensor = torch.tensor(counts, dtype=torch.float, device=device).clamp_min(1.0)
+            return counts_tensor.sum() / (len(counts_tensor) * counts_tensor)
+    return None
 
 
 def build_dataset(cfg, mode: str, logger):
@@ -62,10 +77,19 @@ def build_dataloaders(cfg, logger):
     train_ds = build_dataset(cfg, "train", logger)
     val_ds = build_dataset(cfg, "val", logger)
 
+    sampler = None
+    if cfg.get("sampler", {}).get("balanced") and getattr(train_ds, "sample_weights", None):
+        sampler = WeightedRandomSampler(
+            weights=torch.tensor(train_ds.sample_weights, dtype=torch.double),
+            num_samples=len(train_ds.sample_weights),
+            replacement=True,
+        )
+
     train_loader = DataLoader(
         train_ds,
         batch_size=cfg["batch_size"],
-        shuffle=True,
+        shuffle=sampler is None,
+        sampler=sampler,
         num_workers=cfg["num_workers"],
         drop_last=True,
     )
@@ -79,7 +103,7 @@ def build_dataloaders(cfg, logger):
         if val_ds
         else None
     )
-    return train_loader, val_loader
+    return train_loader, val_loader, train_ds, val_ds
 
 
 def train_one_epoch(model, loader, optimizer, criterion, device, logger, grad_clip=None, log_interval: int = 10):
@@ -132,7 +156,10 @@ def main():
     device = resolve_device(cfg["train"]["device"])
 
     logger.info("Using device: %s", device)
-    train_loader, val_loader = build_dataloaders(cfg, logger)
+    train_loader, val_loader, train_ds, _ = build_dataloaders(cfg, logger)
+
+    class_counts = [train_ds.class_counts.get(i, 0) for i in range(NUM_CLASSES)]
+    class_weights = compute_class_weights(class_counts, cfg["loss"], device)
 
     model = CNNLSTMModel(
         backbone=cfg["model"]["backbone"],
@@ -143,7 +170,10 @@ def main():
         freeze_backbone=cfg["model"]["freeze_backbone"],
     ).to(device)
 
-    criterion = nn.CrossEntropyLoss()
+    if cfg["loss"]["type"] == "focal":
+        criterion = FocalLoss(gamma=cfg["loss"]["focal_gamma"], weight=class_weights)
+    else:
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = optim.AdamW(model.parameters(), lr=cfg["train"]["lr"], weight_decay=cfg["train"]["weight_decay"])
 
     best_val_loss = float("inf")

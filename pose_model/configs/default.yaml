@@ -10,6 +10,8 @@ image_size: 128
 # Dataloader
 batch_size: 8
 num_workers: 4
+sampler:
+  balanced: true
 
 # Model
 model:
@@ -19,6 +21,12 @@ model:
   lstm_layers: 1
   dropout: 0.1
   freeze_backbone: false
+
+# Loss
+loss:
+  type: cross_entropy  # options: cross_entropy, focal
+  class_weights: auto  # auto, none, or explicit list e.g. [1,1,1,1,1,1,1]
+  focal_gamma: 2.0
 
 # Optimization
 train:

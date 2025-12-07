@@ -14,6 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from pose_model.datasets.sequence_dataset import PoseSequenceDataset, NUM_CLASSES
 from pose_model.models.cnn_lstm import CNNLSTMModel
 from pose_model.utils.logger import get_logger
+from pose_model.utils.losses import FocalLoss
 from pose_model.utils.metrics import confusion, per_class_accuracy, sequence_accuracy, sequence_f1
 from pose_model.utils.seed import set_seed
 
@@ -36,6 +37,20 @@ def resolve_device(preference: str):
     if preference == "cuda":
         return torch.device("cuda")
     return torch.device("cpu")
+
+
+def compute_class_weights(counts, loss_cfg, device):
+    mode = loss_cfg.get("class_weights", "none")
+    if isinstance(mode, list):
+        return torch.tensor(mode, dtype=torch.float, device=device)
+    if isinstance(mode, str):
+        mode_lower = mode.lower()
+        if mode_lower == "none":
+            return None
+        if mode_lower == "auto":
+            counts_tensor = torch.tensor(counts, dtype=torch.float, device=device).clamp_min(1.0)
+            return counts_tensor.sum() / (len(counts_tensor) * counts_tensor)
+    return None
 
 
 def evaluate(model, loader, criterion, device):
@@ -101,7 +116,12 @@ def main():
     model.load_state_dict(checkpoint["model_state"])
     logger.info("Loaded checkpoint from %s", checkpoint_path)
 
-    criterion = nn.CrossEntropyLoss()
+    class_counts = [dataset.class_counts.get(i, 0) for i in range(NUM_CLASSES)]
+    class_weights = compute_class_weights(class_counts, cfg["loss"], device)
+    if cfg["loss"]["type"] == "focal":
+        criterion = FocalLoss(gamma=cfg["loss"]["focal_gamma"], weight=class_weights)
+    else:
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
     loss, acc, f1, cls_acc, cm = evaluate(model, loader, criterion, device)
     logger.info("Test loss=%.4f acc=%.4f f1=%.4f", loss, acc, f1)
     logger.info("Per-class accuracy (0-6): %s", ["{:.3f}".format(x) for x in cls_acc])

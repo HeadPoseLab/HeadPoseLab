@@ -1,4 +1,5 @@
 import random
+from collections import Counter
 from pathlib import Path
 from typing import List, Tuple
 
@@ -53,6 +54,8 @@ class PoseSequenceDataset(Dataset):
             raise RuntimeError(f"No person folders found under {self.data_root}")
 
         self.samples: List[Tuple[List[Path], List[int]]] = []
+        self.class_counts: Counter[int] = Counter()
+        self.sample_weights: List[float] = []
         self._build_index(train_ratio, val_ratio, seed)
 
     def _build_index(self, train_ratio: float, val_ratio: float, seed: int):
@@ -74,6 +77,7 @@ class PoseSequenceDataset(Dataset):
             raise ValueError(f"Unknown mode: {self.mode}")
 
         stride = 1 if self.overlap else self.sequence_length
+        class_counter: Counter[int] = Counter()
         for person_dir in target:
             entries = self._read_person_entries(person_dir)
             if len(entries) < self.sequence_length:
@@ -82,10 +86,16 @@ class PoseSequenceDataset(Dataset):
                 window = entries[start : start + self.sequence_length]
                 paths, labels = zip(*window)
                 labels_zero_based = [lbl - 1 for lbl in labels]
+                class_counter.update(labels_zero_based)
                 self.samples.append((list(paths), labels_zero_based))
 
         if not self.samples:
             raise RuntimeError(f"No sequences created for mode={self.mode}. Check data volume and sequence_length.")
+        self.class_counts = class_counter
+        if self.class_counts:
+            for _, labels in self.samples:
+                weights = [1.0 / max(1, self.class_counts[label]) for label in labels]
+                self.sample_weights.append(sum(weights) / len(weights))
 
     @staticmethod
     def _read_person_entries(person_dir: Path) -> List[Tuple[Path, int]]:
