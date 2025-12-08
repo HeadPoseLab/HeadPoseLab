@@ -6,9 +6,6 @@ train_ratio: 0.7
 val_ratio: 0.15
 seed: 42
 image_size: 128
-filter:
-  enabled: true
-  max_factor: 3.0  # cap majority class sequences to min_count * factor
 
 # Dataloader
 batch_size: 8

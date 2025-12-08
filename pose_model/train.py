@@ -64,7 +64,6 @@ def build_dataset(cfg, mode: str, logger):
             val_ratio=cfg["val_ratio"],
             seed=cfg["seed"],
             image_size=cfg["image_size"],
-            filter_cfg=cfg.get("filter", {}),
         )
         return dataset
     except Exception as exc:  # noqa: BLE001
