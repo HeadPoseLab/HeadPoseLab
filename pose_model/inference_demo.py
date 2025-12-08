@@ -13,7 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from pose_model.models.cnn_lstm import CNNLSTMModel
 
-LABEL_MAP = {0: "正", 1: "上", 2: "下", 3: "左", 4: "右", 5: "左歪", 6: "右歪"}
+LABEL_MAP = {0: "正", 1: "下", 2: "左", 3: "右", 4: "歪"}
 
 
 def parse_args():

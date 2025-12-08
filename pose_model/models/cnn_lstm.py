@@ -5,7 +5,7 @@ from torch import nn
 
 from .cnn_backbone import create_backbone
 
-NUM_CLASSES = 7
+NUM_CLASSES = 5
 
 
 class CNNLSTMModel(nn.Module):

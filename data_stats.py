@@ -7,12 +7,10 @@ import matplotlib.pyplot as plt
 
 LABEL_NAMES = {
     1: "正",
-    2: "上",
-    3: "下",
-    4: "左",
-    5: "右",
-    6: "左歪",
-    7: "右歪",
+    2: "下",
+    3: "左",
+    4: "右",
+    5: "歪",
 }
 
 
@@ -60,7 +58,7 @@ def main():
     if total_samples == 0:
         raise RuntimeError("No labels found.")
 
-    labels = list(range(1, 8))
+    labels = list(range(1, 6))
     counts = [total_counter.get(l, 0) for l in labels]
     percents = [c / total_samples * 100 for c in counts]
     names = [LABEL_NAMES.get(l, str(l)) for l in labels]

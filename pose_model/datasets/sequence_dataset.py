@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
 
-NUM_CLASSES = 7
+NUM_CLASSES = 5
 
 
 class PoseSequenceDataset(Dataset):
@@ -18,7 +18,7 @@ class PoseSequenceDataset(Dataset):
       images/
         head_00001.jpg
         ...
-      labels.txt   (image_name;class_id with class_id in [1,7])
+      labels.txt   (image_name;class_id with class_id in [1,5])
     """
 
     def __init__(
