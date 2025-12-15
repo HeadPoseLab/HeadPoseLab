@@ -7,7 +7,6 @@ import torch
 import yaml
 from torch import nn, optim
 from torch.utils.data import DataLoader, WeightedRandomSampler
-from torch.utils.tensorboard import SummaryWriter
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -151,8 +150,6 @@ def main():
     args = parse_args()
     cfg = load_config(args.config)
     Path(cfg["train"]["save_dir"]).mkdir(parents=True, exist_ok=True)
-    log_dir = cfg["train"].get("log_dir", "runs")
-    Path(log_dir).mkdir(parents=True, exist_ok=True)
 
     logger = get_logger()
     set_seed(cfg["seed"])
@@ -180,17 +177,13 @@ def main():
         fusion_dropout=cfg["model"].get("fusion_dropout", 0.0),
     ).to(device)
 
-    writer = SummaryWriter(log_dir=log_dir)
-    try:
-        model.eval()
-        example = torch.zeros(
-            1, cfg["sequence_length"], 3, cfg["image_size"], cfg["image_size"], device=device, dtype=torch.float32
-        )
-        with torch.no_grad():
-            writer.add_graph(model, example)
-        model.train()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Skipping graph export to TensorBoard: %s", exc)
+from torch.utils.tensorboard import SummaryWriter
+
+writer = SummaryWriter(log_dir=cfg["train"].get("log_dir", "runs"))
+example = torch.zeros(1, cfg["sequence_length"], 3, cfg["image_size"], cfg["image_size"], device=device)
+with torch.no_grad():
+    writer.add_graph(model, example)
+
 
     if cfg["loss"]["type"] == "focal":
         criterion = FocalLoss(gamma=cfg["loss"]["focal_gamma"], weight=class_weights)
@@ -236,19 +229,8 @@ def main():
                 ckpt_path = os.path.join(cfg["train"]["save_dir"], "best.pt")
                 torch.save({"model_state": model.state_dict(), "cfg": cfg}, ckpt_path)
                 logger.info("Saved best checkpoint to %s", ckpt_path)
-            if writer:
-                writer.add_scalar("train/loss", train_loss, epoch)
-                writer.add_scalar("val/loss", val_loss, epoch)
-                writer.add_scalar("val/acc", val_acc, epoch)
-                writer.add_scalar("val/f1", val_f1, epoch)
         else:
             logger.info("Epoch %d | train_loss=%.4f", epoch, train_loss)
-            if writer:
-                writer.add_scalar("train/loss", train_loss, epoch)
-
-    if writer:
-        writer.flush()
-        writer.close()
 
 
 if __name__ == "__main__":
