@@ -7,6 +7,7 @@ import torch
 import yaml
 from torch import nn, optim
 from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.tensorboard import SummaryWriter
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -177,12 +178,17 @@ def main():
         fusion_dropout=cfg["model"].get("fusion_dropout", 0.0),
     ).to(device)
 
-from torch.utils.tensorboard import SummaryWriter
-
-writer = SummaryWriter(log_dir=cfg["train"].get("log_dir", "runs"))
-example = torch.zeros(1, cfg["sequence_length"], 3, cfg["image_size"], cfg["image_size"], device=device)
-with torch.no_grad():
-    writer.add_graph(model, example)
+    writer = SummaryWriter(log_dir=cfg["train"].get("log_dir", "runs"))
+    try:
+        model.eval()
+        example = torch.zeros(
+            1, cfg["sequence_length"], 3, cfg["image_size"], cfg["image_size"], device=device, dtype=torch.float32
+        )
+        with torch.no_grad():
+            writer.add_graph(model, example)
+        model.train()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Skipping graph export to TensorBoard: %s", exc)
 
 
     if cfg["loss"]["type"] == "focal":
@@ -231,6 +237,9 @@ with torch.no_grad():
                 logger.info("Saved best checkpoint to %s", ckpt_path)
         else:
             logger.info("Epoch %d | train_loss=%.4f", epoch, train_loss)
+
+    writer.flush()
+    writer.close()
 
 
 if __name__ == "__main__":
