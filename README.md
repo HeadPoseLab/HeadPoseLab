@@ -31,12 +31,15 @@ data/
 ## 准备环境
 ```bash
 cd pose_model
-python -m venv .venv && .\.venv\Scripts\Activate
+py -3.10 -m venv .venv
+.\.venv\Scripts\Activate
 pip install -r requirements.txt
 ```
 
 ## 运行训练
 ```bash
+cd pose_model
+.\.venv\Scripts\Activate
 python train.py --config configs/default.yaml
 ```
 模型与日志目录由 `configs/default.yaml` 中的 `train.save_dir` 控制。

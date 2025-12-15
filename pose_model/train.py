@@ -7,6 +7,7 @@ import torch
 import yaml
 from torch import nn, optim
 from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.tensorboard import SummaryWriter
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -150,6 +151,8 @@ def main():
     args = parse_args()
     cfg = load_config(args.config)
     Path(cfg["train"]["save_dir"]).mkdir(parents=True, exist_ok=True)
+    log_dir = cfg["train"].get("log_dir", "runs")
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
 
     logger = get_logger()
     set_seed(cfg["seed"])
@@ -166,15 +169,44 @@ def main():
         feature_dim=cfg["model"]["feature_dim"],
         lstm_hidden=cfg["model"]["lstm_hidden"],
         lstm_layers=cfg["model"]["lstm_layers"],
+        bidirectional=cfg["model"].get("bidirectional", False),
         dropout=cfg["model"]["dropout"],
         freeze_backbone=cfg["model"]["freeze_backbone"],
+        freeze_stages=cfg["model"].get("freeze_stages", -1),
+        pretrained=cfg["model"].get("pretrained", True),
+        resnet_variant=cfg["model"].get("resnet_variant", "resnet18"),
+        cnn_branch_channels=cfg["model"].get("cnn_branch_channels", None),
+        fusion=cfg["model"].get("fusion", "concat"),
+        fusion_dropout=cfg["model"].get("fusion_dropout", 0.0),
     ).to(device)
+
+    writer = SummaryWriter(log_dir=log_dir)
+    try:
+        model.eval()
+        example = torch.zeros(
+            1, cfg["sequence_length"], 3, cfg["image_size"], cfg["image_size"], device=device, dtype=torch.float32
+        )
+        with torch.no_grad():
+            writer.add_graph(model, example)
+        model.train()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Skipping graph export to TensorBoard: %s", exc)
 
     if cfg["loss"]["type"] == "focal":
         criterion = FocalLoss(gamma=cfg["loss"]["focal_gamma"], weight=class_weights)
     else:
         criterion = nn.CrossEntropyLoss(weight=class_weights)
-    optimizer = optim.AdamW(model.parameters(), lr=cfg["train"]["lr"], weight_decay=cfg["train"]["weight_decay"])
+    base_lr = cfg["train"]["lr"]
+    backbone_lr_scale = cfg["train"].get("backbone_lr_scale", 0.1)
+    backbone_params = [p for p in model.backbone.parameters() if p.requires_grad]
+    backbone_param_ids = {id(p) for p in backbone_params}
+    other_params = [p for p in model.parameters() if p.requires_grad and id(p) not in backbone_param_ids]
+    param_groups = []
+    if backbone_params:
+        param_groups.append({"params": backbone_params, "lr": base_lr * backbone_lr_scale})
+    if other_params:
+        param_groups.append({"params": other_params, "lr": base_lr})
+    optimizer = optim.AdamW(param_groups, lr=base_lr, weight_decay=cfg["train"]["weight_decay"])
 
     best_val_loss = float("inf")
     for epoch in range(1, cfg["train"]["epochs"] + 1):
@@ -204,8 +236,19 @@ def main():
                 ckpt_path = os.path.join(cfg["train"]["save_dir"], "best.pt")
                 torch.save({"model_state": model.state_dict(), "cfg": cfg}, ckpt_path)
                 logger.info("Saved best checkpoint to %s", ckpt_path)
+            if writer:
+                writer.add_scalar("train/loss", train_loss, epoch)
+                writer.add_scalar("val/loss", val_loss, epoch)
+                writer.add_scalar("val/acc", val_acc, epoch)
+                writer.add_scalar("val/f1", val_f1, epoch)
         else:
             logger.info("Epoch %d | train_loss=%.4f", epoch, train_loss)
+            if writer:
+                writer.add_scalar("train/loss", train_loss, epoch)
+
+    if writer:
+        writer.flush()
+        writer.close()
 
 
 if __name__ == "__main__":

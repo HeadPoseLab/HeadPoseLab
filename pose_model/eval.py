@@ -108,8 +108,15 @@ def main():
         feature_dim=cfg["model"]["feature_dim"],
         lstm_hidden=cfg["model"]["lstm_hidden"],
         lstm_layers=cfg["model"]["lstm_layers"],
+        bidirectional=cfg["model"].get("bidirectional", False),
         dropout=cfg["model"]["dropout"],
         freeze_backbone=cfg["model"]["freeze_backbone"],
+        freeze_stages=cfg["model"].get("freeze_stages", -1),
+        pretrained=cfg["model"].get("pretrained", True),
+        resnet_variant=cfg["model"].get("resnet_variant", "resnet18"),
+        cnn_branch_channels=cfg["model"].get("cnn_branch_channels", None),
+        fusion=cfg["model"].get("fusion", "concat"),
+        fusion_dropout=cfg["model"].get("fusion_dropout", 0.0),
     ).to(device)
 
     checkpoint = torch.load(checkpoint_path, map_location=device)

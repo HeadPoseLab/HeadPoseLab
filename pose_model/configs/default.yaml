@@ -15,12 +15,19 @@ sampler:
 
 # Model
 model:
-  backbone: simple_cnn  # options: simple_cnn, resnet18
-  feature_dim: 128
-  lstm_hidden: 128
-  lstm_layers: 1
-  dropout: 0.1
+  backbone: hybrid_cnn_resnet  # hybrid_cnn_resnet
+  resnet_variant: resnet50     # resnet18 or resnet50
+  cnn_branch_channels: [32, 64, 128]
+  feature_dim: 256             # fused feature dim after CNN+ResNet
+  fusion: concat               # concat or sum
+  fusion_dropout: 0.1
+  lstm_hidden: 192
+  lstm_layers: 2
+  bidirectional: true
+  dropout: 0.2
   freeze_backbone: false
+  freeze_stages: 1  # -1: no freeze, 0: stem, 1: stem+layer1, 2: +layer2, 3: +layer3, 4: full backbone
+  pretrained: true
 
 # Loss
 loss:
@@ -32,11 +39,13 @@ loss:
 train:
   epochs: 20
   lr: 0.001
+  backbone_lr_scale: 0.1
   weight_decay: 0.0001
   grad_clip: 5.0
   device: auto  # auto, cpu, or cuda
   save_dir: ./checkpoints
   log_interval: 10
+  log_dir: ./runs
 
 # Evaluation
 eval:
