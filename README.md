@@ -46,6 +46,8 @@ python train.py --config configs/default.yaml
 
 ## 评估
 ```bash
+cd pose_model
+.\.venv\Scripts\Activate
 python eval.py --config configs/default.yaml --checkpoint checkpoints/best.pt
 ```
 
