@@ -16,20 +16,27 @@ sampler:
 # Model
 model:
   backbone: hybrid_cnn_resnet  # hybrid_cnn_resnet
-  resnet_variant: resnet50     # resnet18 or resnet50
+  resnet_variant: resnet50     # fixed to resnet50
   cnn_branch_channels: [32, 64, 128]
   feature_dim: 256             # fused feature dim after CNN+ResNet
   fusion: concat               # concat or sum
   fusion_dropout: 0.1
-  lstm_hidden: 192
-  lstm_layers: 2
-  bidirectional: true
-  dropout: 0.2
-  temporal_encoder: tcn        # options: lstm, tcn
+  temporal_encoder: transformer # options: tcn, transformer
   tcn_channels: [192, 192]
   tcn_kernel: 3
   tcn_dilations: [1, 2]
   tcn_dropout: 0.2
+  transformer:
+    input_dim: null            # optional override; defaults to feature_dim
+    num_layers: 2
+    nhead: 4
+    dim_feedforward: 512
+    dropout: 0.1
+    activation: relu
+    use_positional_encoding: true
+    pos_encoding: learned      # learned or sinusoidal
+    pre_norm: true
+    max_len: 256
   freeze_backbone: false
   freeze_stages: 1  # -1: no freeze, 0: stem, 1: stem+layer1, 2: +layer2, 3: +layer3, 4: full backbone
   pretrained: true

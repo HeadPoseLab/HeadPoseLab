@@ -33,21 +33,18 @@ class ResNetBackbone(nn.Module):
     def __init__(
         self,
         feature_dim: int = 256,
-        variant: str = "resnet18",
+        variant: str = "resnet50",
         freeze_backbone: bool = False,
         freeze_stages: int = -1,
         pretrained: bool = True,
     ):
         super().__init__()
         variant = variant.lower()
-        if variant == "resnet18":
-            weights = models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
-            base_model = models.resnet18(weights=weights)
-        elif variant == "resnet50":
+        if variant == "resnet50":
             weights = models.ResNet50_Weights.IMAGENET1K_V1 if pretrained else None
             base_model = models.resnet50(weights=weights)
         else:
-            raise ValueError(f"Unsupported resnet variant: {variant}")
+            raise ValueError(f"Unsupported resnet variant: {variant}. Only resnet50 is supported.")
 
         self.stem = nn.Sequential(base_model.conv1, base_model.bn1, base_model.relu, base_model.maxpool)
         self.layer1 = base_model.layer1
@@ -168,7 +165,7 @@ def create_backbone(
     freeze_backbone: bool = False,
     freeze_stages: int = -1,
     pretrained: bool = True,
-    resnet_variant: str = "resnet18",
+    resnet_variant: str = "resnet50",
     cnn_branch_channels: Optional[Iterable[int]] = None,
     fusion: str = "concat",
     fusion_dropout: float = 0.0,
@@ -176,14 +173,6 @@ def create_backbone(
     name = name.lower()
     if name == "simple_cnn":
         return SimpleCNNBackbone(feature_dim=feature_dim)
-    if name == "resnet18":
-        return ResNetBackbone(
-            feature_dim=feature_dim,
-            variant="resnet18",
-            freeze_backbone=freeze_backbone,
-            freeze_stages=freeze_stages,
-            pretrained=pretrained,
-        )
     if name == "resnet50":
         return ResNetBackbone(
             feature_dim=feature_dim,

@@ -4,6 +4,7 @@ import torch
 from torch import nn
 
 from .cnn_backbone import create_backbone
+from .transformer_encoder import TransformerEncoder
 
 NUM_CLASSES = 5
 
@@ -62,11 +63,7 @@ class CNNLSTMModel(nn.Module):
         self,
         backbone: str = "simple_cnn",
         feature_dim: int = 128,
-        lstm_hidden: int = 128,
-        lstm_layers: int = 1,
-        bidirectional: bool = False,
-        dropout: float = 0.1,
-        temporal_encoder: str = "lstm",
+        temporal_encoder: str = "transformer",
         tcn_channels: Sequence[int] | None = None,
         tcn_kernel: int = 3,
         tcn_dilations: Sequence[int] | None = None,
@@ -79,6 +76,7 @@ class CNNLSTMModel(nn.Module):
         fusion: str = "concat",
         fusion_dropout: float = 0.0,
         num_classes: int = NUM_CLASSES,
+        transformer_cfg: dict | None = None,
     ):
         super().__init__()
         self.backbone = create_backbone(
@@ -105,21 +103,25 @@ class CNNLSTMModel(nn.Module):
                 dropout=tcn_dropout,
             )
             self.classifier = nn.Linear(self.tcn.output_dim, num_classes)
-            self.lstm = None
-        elif encoder == "lstm":
-            self.tcn = None
-            self.lstm = nn.LSTM(
-                input_size=feature_dim,
-                hidden_size=lstm_hidden,
-                num_layers=lstm_layers,
-                dropout=dropout if lstm_layers > 1 else 0.0,
-                bidirectional=bidirectional,
-                batch_first=True,
+        elif encoder == "transformer":
+            cfg = transformer_cfg or {}
+            transformer_dim = cfg.get("input_dim", feature_dim) or feature_dim
+            self.input_proj = nn.Linear(feature_dim, transformer_dim) if transformer_dim != feature_dim else None
+            self.transformer = TransformerEncoder(
+                input_dim=transformer_dim,
+                num_layers=cfg.get("num_layers", 2),
+                nhead=cfg.get("nhead", 4),
+                dim_feedforward=cfg.get("dim_feedforward", 512),
+                dropout=cfg.get("dropout", 0.1),
+                activation=cfg.get("activation", "relu"),
+                use_positional_encoding=cfg.get("use_positional_encoding", True),
+                pos_encoding=cfg.get("pos_encoding", "learned"),
+                pre_norm=cfg.get("pre_norm", True),
+                max_len=cfg.get("max_len", 500),
             )
-            num_dirs = 2 if bidirectional else 1
-            self.classifier = nn.Linear(lstm_hidden * num_dirs, num_classes)
+            self.classifier = nn.Linear(transformer_dim, num_classes)
         else:
-            raise ValueError(f"Unsupported temporal_encoder: {temporal_encoder}")
+            raise ValueError(f"Unsupported temporal_encoder: {temporal_encoder} (only tcn or transformer supported)")
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         # x: [batch, seq, C, H, W]
@@ -128,7 +130,9 @@ class CNNLSTMModel(nn.Module):
         features = features.view(b, t, -1)
         if self.temporal_encoder == "tcn":
             encoded = self.tcn(features)
-        else:
-            encoded, _ = self.lstm(features)
+        else:  # transformer
+            if self.input_proj is not None:
+                features = self.input_proj(features)
+            encoded = self.transformer(features)
         logits = self.classifier(encoded)
         return logits, encoded
