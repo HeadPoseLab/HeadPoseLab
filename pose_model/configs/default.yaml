@@ -1,5 +1,7 @@
 # Data
 data_root: ./data
+head_dir: head_pose
+hand_dir: hand_pose
 sequence_length: 16
 overlap: true  # use sliding window with stride 1 to enlarge samples
 train_ratio: 0.7
@@ -21,6 +23,8 @@ model:
   feature_dim: 256             # fused feature dim after CNN+ResNet
   fusion: concat               # concat or sum
   fusion_dropout: 0.1
+  shared_backbone: false       # share backbone weights for head/hand streams
+  shared_temporal: false       # share temporal encoder for head/hand streams
   temporal_encoder: transformer # options: tcn, transformer
   tcn_channels: [192, 192]
   tcn_kernel: 3
@@ -46,6 +50,8 @@ loss:
   type: cross_entropy  # options: cross_entropy, focal
   class_weights: auto  # auto, none, or explicit list e.g. [1,1,1,1,1,1,1]
   focal_gamma: 2.0
+  head_weight: 1.0
+  hand_weight: 1.0
 
 # Optimization
 train:

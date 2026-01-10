@@ -19,13 +19,16 @@ pose_model/
 ## 数据格式
 ```
 data/
-  person_001/
+  head_pose/
     images/
       head_00001.jpg
       ...
-    labels.txt   # 每行: 文件名;类别编号(1-5)
-  person_002/
-    ...
+    labels.json   # 头部姿态标签 + 头部点归一化坐标
+  hand_pose/
+    images/
+      hand_00001.jpg   # 左右手截图横向拼接
+      ...
+    labels.json   # 手部姿态标签 + 左/右手点归一化坐标
 ```
 
 ## 准备环境

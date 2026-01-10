@@ -1,0 +1,224 @@
+import json
+import re
+import random
+from collections import Counter
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+from PIL import Image
+import torch
+from torch.utils.data import Dataset
+from torchvision import transforms
+
+NUM_CLASSES = 5
+
+_INDEX_RE = re.compile(r"(\d+)")
+
+
+def _extract_index(filename: str) -> int | None:
+    matches = _INDEX_RE.findall(filename)
+    if not matches:
+        return None
+    return int(matches[-1])
+
+
+class MultiPoseSequenceDataset(Dataset):
+    """
+    Dataset for paired head/hand pose sequences:
+    person_xx/
+      head_pose/images/*.jpg + head_pose/labels.json
+      hand_pose/images/*.jpg + hand_pose/labels.json
+    labels.json item: {"image": "...", "label": int, "keypoints": {...}}
+    """
+
+    def __init__(
+        self,
+        data_root: str,
+        mode: str = "train",
+        sequence_length: int = 16,
+        overlap: bool = False,
+        train_ratio: float = 0.7,
+        val_ratio: float = 0.15,
+        seed: int = 42,
+        image_size: int = 128,
+        transform=None,
+        head_dir: str = "head_pose",
+        hand_dir: str = "hand_pose",
+    ):
+        super().__init__()
+        self.data_root = Path(data_root)
+        self.mode = mode
+        self.sequence_length = sequence_length
+        self.overlap = overlap
+        self.image_size = image_size
+        self.transform = transform or transforms.Compose(
+            [
+                transforms.Resize((image_size, image_size)),
+                transforms.ToTensor(),
+            ]
+        )
+        self.head_dir = head_dir
+        self.hand_dir = hand_dir
+
+        if not self.data_root.exists():
+            raise FileNotFoundError(f"data_root not found: {self.data_root}")
+
+        self.person_dirs = sorted([p for p in self.data_root.iterdir() if p.is_dir()])
+        if not self.person_dirs:
+            raise RuntimeError(f"No person folders found under {self.data_root}")
+
+        self.samples: List[
+            Tuple[List[Path], List[Path], List[int], List[int], List[List[float]], List[List[float]]]
+        ] = []
+        self.class_counts_head: Counter[int] = Counter()
+        self.class_counts_hand: Counter[int] = Counter()
+        self.sample_weights: List[float] = []
+        self._build_index(train_ratio, val_ratio, seed)
+
+    def _build_index(self, train_ratio: float, val_ratio: float, seed: int):
+        rng = random.Random(seed)
+        persons = self.person_dirs.copy()
+        rng.shuffle(persons)
+
+        total = len(persons)
+        n_train = int(total * train_ratio)
+        n_val = int(total * val_ratio)
+
+        if self.mode == "train":
+            target = persons[:n_train]
+        elif self.mode == "val":
+            target = persons[n_train : n_train + n_val]
+        elif self.mode == "test":
+            target = persons[n_train + n_val :]
+        else:
+            raise ValueError(f"Unknown mode: {self.mode}")
+
+        stride = 1 if self.overlap else self.sequence_length
+        head_counter: Counter[int] = Counter()
+        hand_counter: Counter[int] = Counter()
+        for person_dir in target:
+            aligned = self._read_aligned_entries(person_dir)
+            if len(aligned) < self.sequence_length:
+                continue
+            for start in range(0, len(aligned) - self.sequence_length + 1, stride):
+                window = aligned[start : start + self.sequence_length]
+                head_paths, hand_paths, head_labels, hand_labels, head_coords, hand_coords = zip(*window)
+                head_labels_zero = [lbl - 1 for lbl in head_labels]
+                hand_labels_zero = [lbl - 1 for lbl in hand_labels]
+                head_counter.update(head_labels_zero)
+                hand_counter.update(hand_labels_zero)
+                self.samples.append(
+                    (
+                        list(head_paths),
+                        list(hand_paths),
+                        list(head_labels_zero),
+                        list(hand_labels_zero),
+                        list(head_coords),
+                        list(hand_coords),
+                    )
+                )
+
+        if not self.samples:
+            raise RuntimeError(f"No sequences created for mode={self.mode}. Check data volume and sequence_length.")
+        self.class_counts_head = head_counter
+        self.class_counts_hand = hand_counter
+        if self.class_counts_head and self.class_counts_hand:
+            for _, _, head_labels, hand_labels, _, _ in self.samples:
+                head_weights = [1.0 / max(1, self.class_counts_head[label]) for label in head_labels]
+                hand_weights = [1.0 / max(1, self.class_counts_hand[label]) for label in hand_labels]
+                avg_head = sum(head_weights) / len(head_weights)
+                avg_hand = sum(hand_weights) / len(hand_weights)
+                self.sample_weights.append((avg_head + avg_hand) / 2.0)
+
+    def _read_aligned_entries(
+        self, person_dir: Path
+    ) -> List[Tuple[Path, Path, int, int, List[float], List[float]]]:
+        head_root = person_dir / self.head_dir
+        hand_root = person_dir / self.hand_dir
+        head_labels_path = head_root / "labels.json"
+        hand_labels_path = hand_root / "labels.json"
+        if not head_labels_path.exists() or not hand_labels_path.exists():
+            raise FileNotFoundError(f"labels.json missing in {person_dir}")
+
+        head_entries = self._load_labels(head_labels_path)
+        hand_entries = self._load_labels(hand_labels_path)
+        head_map = self._index_entries(head_entries)
+        hand_map = self._index_entries(hand_entries)
+
+        common_indices = sorted(set(head_map.keys()) & set(hand_map.keys()))
+        aligned: List[Tuple[Path, Path, int, int, List[float], List[float]]] = []
+        for idx in common_indices:
+            head_item = head_map[idx]
+            hand_item = hand_map[idx]
+            head_image = head_root / "images" / head_item["image"]
+            hand_image = hand_root / "images" / hand_item["image"]
+            aligned.append(
+                (
+                    head_image,
+                    hand_image,
+                    head_item["label"],
+                    hand_item["label"],
+                    self._flatten_head_coords(head_item.get("keypoints", {})),
+                    self._flatten_hand_coords(hand_item.get("keypoints", {})),
+                )
+            )
+        return aligned
+
+    @staticmethod
+    def _load_labels(path: Path) -> List[Dict]:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            raise ValueError(f"labels.json must be a list: {path}")
+        return data
+
+    @staticmethod
+    def _index_entries(entries: List[Dict]) -> Dict[int, Dict]:
+        indexed: Dict[int, Dict] = {}
+        for entry in entries:
+            image_name = entry.get("image")
+            if not image_name:
+                continue
+            idx = _extract_index(image_name)
+            if idx is None:
+                continue
+            indexed[idx] = entry
+        return indexed
+
+    @staticmethod
+    def _flatten_head_coords(keypoints: Dict) -> List[float]:
+        head = keypoints.get("head", {})
+        return [float(head.get("x", 0.0)), float(head.get("y", 0.0))]
+
+    @staticmethod
+    def _flatten_hand_coords(keypoints: Dict) -> List[float]:
+        left = keypoints.get("left_hand", {})
+        right = keypoints.get("right_hand", {})
+        return [
+            float(left.get("x", 0.0)),
+            float(left.get("y", 0.0)),
+            float(right.get("x", 0.0)),
+            float(right.get("y", 0.0)),
+        ]
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        head_paths, hand_paths, head_labels, hand_labels, head_coords, hand_coords = self.samples[idx]
+        head_images = [self.transform(Image.open(path).convert("RGB")) for path in head_paths]
+        hand_images = [self.transform(Image.open(path).convert("RGB")) for path in hand_paths]
+        head_images_tensor = torch.stack(head_images, dim=0)
+        hand_images_tensor = torch.stack(hand_images, dim=0)
+        head_labels_tensor = torch.tensor(head_labels, dtype=torch.long)
+        hand_labels_tensor = torch.tensor(hand_labels, dtype=torch.long)
+        head_coords_tensor = torch.tensor(head_coords, dtype=torch.float32)
+        hand_coords_tensor = torch.tensor(hand_coords, dtype=torch.float32)
+        return (
+            head_images_tensor,
+            hand_images_tensor,
+            head_labels_tensor,
+            hand_labels_tensor,
+            head_coords_tensor,
+            hand_coords_tensor,
+        )
