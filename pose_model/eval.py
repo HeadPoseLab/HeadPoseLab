@@ -11,7 +11,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from pose_model.datasets.multimodal_sequence_dataset import MultiPoseSequenceDataset, NUM_CLASSES
+from pose_model.datasets.multimodal_sequence_dataset import (
+    MultiPoseSequenceDataset,
+    HEAD_NUM_CLASSES,
+    HAND_NUM_CLASSES,
+)
 from pose_model.models.multi_task_model import MultiTaskPoseModel
 from pose_model.utils.logger import get_logger
 from pose_model.utils.losses import FocalLoss
@@ -67,8 +71,8 @@ def evaluate(model, loader, criterion_head, criterion_hand, device, head_weight:
             head_labels = head_labels.to(device)
             hand_labels = hand_labels.to(device)
             head_logits, hand_logits = model(head_images, hand_images)
-            head_loss = criterion_head(head_logits.view(-1, NUM_CLASSES), head_labels.view(-1))
-            hand_loss = criterion_hand(hand_logits.view(-1, NUM_CLASSES), hand_labels.view(-1))
+            head_loss = criterion_head(head_logits.view(-1, HEAD_NUM_CLASSES), head_labels.view(-1))
+            hand_loss = criterion_hand(hand_logits.view(-1, HAND_NUM_CLASSES), hand_labels.view(-1))
             loss = head_weight * head_loss + hand_weight * hand_loss
             total_loss += loss.item()
             head_accs.append(sequence_accuracy(head_logits, head_labels))
@@ -89,10 +93,10 @@ def evaluate(model, loader, criterion_head, criterion_hand, device, head_weight:
     hand_logits_cat = torch.cat(hand_logits_all, dim=0)
     head_labels_cat = torch.cat(head_labels_all, dim=0)
     hand_labels_cat = torch.cat(hand_labels_all, dim=0)
-    head_cls_acc = per_class_accuracy(head_logits_cat, head_labels_cat, NUM_CLASSES)
-    hand_cls_acc = per_class_accuracy(hand_logits_cat, hand_labels_cat, NUM_CLASSES)
-    head_cm = confusion(head_logits_cat, head_labels_cat, NUM_CLASSES)
-    hand_cm = confusion(hand_logits_cat, hand_labels_cat, NUM_CLASSES)
+    head_cls_acc = per_class_accuracy(head_logits_cat, head_labels_cat, HEAD_NUM_CLASSES)
+    hand_cls_acc = per_class_accuracy(hand_logits_cat, hand_labels_cat, HAND_NUM_CLASSES)
+    head_cm = confusion(head_logits_cat, head_labels_cat, HEAD_NUM_CLASSES)
+    hand_cm = confusion(hand_logits_cat, hand_labels_cat, HAND_NUM_CLASSES)
     return avg_loss, mean_head_acc, mean_hand_acc, mean_head_f1, mean_hand_f1, head_cls_acc, hand_cls_acc, head_cm, hand_cm
 
 
@@ -132,6 +136,8 @@ def main():
         transformer_cfg=cfg["model"].get("transformer", None),
         shared_backbone=cfg["model"].get("shared_backbone", False),
         shared_temporal=cfg["model"].get("shared_temporal", False),
+        num_head_classes=cfg["model"].get("num_head_classes", HEAD_NUM_CLASSES),
+        num_hand_classes=cfg["model"].get("num_hand_classes", HAND_NUM_CLASSES),
         freeze_backbone=cfg["model"]["freeze_backbone"],
         freeze_stages=cfg["model"].get("freeze_stages", -1),
         pretrained=cfg["model"].get("pretrained", True),
@@ -145,8 +151,8 @@ def main():
     model.load_state_dict(checkpoint["model_state"])
     logger.info("Loaded checkpoint from %s", checkpoint_path)
 
-    head_counts = [dataset.class_counts_head.get(i, 0) for i in range(NUM_CLASSES)]
-    hand_counts = [dataset.class_counts_hand.get(i, 0) for i in range(NUM_CLASSES)]
+    head_counts = [dataset.class_counts_head.get(i, 0) for i in range(HEAD_NUM_CLASSES)]
+    hand_counts = [dataset.class_counts_hand.get(i, 0) for i in range(HAND_NUM_CLASSES)]
     class_weights_head = compute_class_weights(head_counts, cfg["loss"], device)
     class_weights_hand = compute_class_weights(hand_counts, cfg["loss"], device)
     head_weight = cfg["loss"].get("head_weight", 1.0)
@@ -169,8 +175,16 @@ def main():
         hand_cm,
     ) = evaluate(model, loader, criterion_head, criterion_hand, device, head_weight, hand_weight)
     logger.info("Test loss=%.4f head_acc=%.4f hand_acc=%.4f head_f1=%.4f hand_f1=%.4f", loss, head_acc, hand_acc, head_f1, hand_f1)
-    logger.info("Head per-class accuracy (0-6): %s", ["{:.3f}".format(x) for x in head_cls_acc])
-    logger.info("Hand per-class accuracy (0-6): %s", ["{:.3f}".format(x) for x in hand_cls_acc])
+    logger.info(
+        "Head per-class accuracy (0-%d): %s",
+        HEAD_NUM_CLASSES - 1,
+        ["{:.3f}".format(x) for x in head_cls_acc],
+    )
+    logger.info(
+        "Hand per-class accuracy (0-%d): %s",
+        HAND_NUM_CLASSES - 1,
+        ["{:.3f}".format(x) for x in hand_cls_acc],
+    )
     logger.info("Head confusion matrix:\n%s", head_cm)
     logger.info("Hand confusion matrix:\n%s", hand_cm)
 

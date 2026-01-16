@@ -2,10 +2,10 @@
 data_root: ./data
 head_dir: head_pose
 hand_dir: hand_pose
-sequence_length: 16
-overlap: true  # use sliding window with stride 1 to enlarge samples
-train_ratio: 0.7
-val_ratio: 0.15
+sequence_length: 12
+overlap: true
+train_ratio: 0.8
+val_ratio: 0.1
 seed: 42
 image_size: 128
 
@@ -17,50 +17,52 @@ sampler:
 
 # Model
 model:
-  backbone: hybrid_cnn_resnet  # hybrid_cnn_resnet
-  resnet_variant: resnet50     # fixed to resnet50
+  backbone: hybrid_cnn_resnet
+  resnet_variant: resnet50
   cnn_branch_channels: [32, 64, 128]
-  feature_dim: 256             # fused feature dim after CNN+ResNet
-  fusion: concat               # concat or sum
-  fusion_dropout: 0.1
-  shared_backbone: false       # share backbone weights for head/hand streams
-  shared_temporal: false       # share temporal encoder for head/hand streams
-  temporal_encoder: transformer # options: tcn, transformer
+  feature_dim: 256
+  fusion: concat
+  fusion_dropout: 0.05
+  shared_backbone: true
+  shared_temporal: false
+  num_head_classes: 5
+  num_hand_classes: 4
+  temporal_encoder: transformer
   tcn_channels: [192, 192]
   tcn_kernel: 3
   tcn_dilations: [1, 2]
   tcn_dropout: 0.2
   transformer:
-    input_dim: null            # optional override; defaults to feature_dim
-    num_layers: 2
-    nhead: 4
-    dim_feedforward: 512
-    dropout: 0.1
+    input_dim: 256
+    num_layers: 3
+    nhead: 8
+    dim_feedforward: 768
+    dropout: 0.2
     activation: relu
     use_positional_encoding: true
-    pos_encoding: learned      # learned or sinusoidal
+    pos_encoding: learned
     pre_norm: true
     max_len: 256
   freeze_backbone: false
-  freeze_stages: 1  # -1: no freeze, 0: stem, 1: stem+layer1, 2: +layer2, 3: +layer3, 4: full backbone
+  freeze_stages: 1
   pretrained: true
 
 # Loss
 loss:
-  type: cross_entropy  # options: cross_entropy, focal
-  class_weights: auto  # auto, none, or explicit list e.g. [1,1,1,1,1,1,1]
-  focal_gamma: 2.0
+  type: focal
+  class_weights: auto
+  focal_gamma: 1.5
   head_weight: 1.0
-  hand_weight: 1.0
+  hand_weight: 1.2
 
 # Optimization
 train:
-  epochs: 20
-  lr: 0.001
-  backbone_lr_scale: 0.1
+  epochs: 100
+  lr: 0.0007
+  backbone_lr_scale: 0.05
   weight_decay: 0.0001
   grad_clip: 5.0
-  device: auto  # auto, cpu, or cuda
+  device: auto
   save_dir: ./checkpoints
   log_interval: 10
   log_dir: ./runs

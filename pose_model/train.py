@@ -13,7 +13,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from pose_model.datasets.multimodal_sequence_dataset import MultiPoseSequenceDataset, NUM_CLASSES
+from pose_model.datasets.multimodal_sequence_dataset import (
+    MultiPoseSequenceDataset,
+    HEAD_NUM_CLASSES,
+    HAND_NUM_CLASSES,
+)
 from pose_model.models.multi_task_model import MultiTaskPoseModel
 from pose_model.utils.logger import get_logger
 from pose_model.utils.losses import FocalLoss
@@ -131,8 +135,8 @@ def train_one_epoch(
         hand_labels = hand_labels.to(device)
 
         head_logits, hand_logits = model(head_images, hand_images)
-        head_loss = criterion_head(head_logits.view(-1, NUM_CLASSES), head_labels.view(-1))
-        hand_loss = criterion_hand(hand_logits.view(-1, NUM_CLASSES), hand_labels.view(-1))
+        head_loss = criterion_head(head_logits.view(-1, HEAD_NUM_CLASSES), head_labels.view(-1))
+        hand_loss = criterion_hand(hand_logits.view(-1, HAND_NUM_CLASSES), hand_labels.view(-1))
         loss = head_weight * head_loss + hand_weight * hand_loss
 
         optimizer.zero_grad()
@@ -168,8 +172,8 @@ def evaluate(model, loader, criterion_head, criterion_hand, device, head_weight:
             head_labels = head_labels.to(device)
             hand_labels = hand_labels.to(device)
             head_logits, hand_logits = model(head_images, hand_images)
-            head_loss = criterion_head(head_logits.view(-1, NUM_CLASSES), head_labels.view(-1))
-            hand_loss = criterion_hand(hand_logits.view(-1, NUM_CLASSES), hand_labels.view(-1))
+            head_loss = criterion_head(head_logits.view(-1, HEAD_NUM_CLASSES), head_labels.view(-1))
+            hand_loss = criterion_hand(hand_logits.view(-1, HAND_NUM_CLASSES), hand_labels.view(-1))
             loss = head_weight * head_loss + hand_weight * hand_loss
             total_loss += loss.item()
             head_accs.append(sequence_accuracy(head_logits, head_labels))
@@ -197,8 +201,8 @@ def main():
     logger.info("Using device: %s", device)
     train_loader, val_loader, train_ds, _ = build_dataloaders(cfg, logger)
 
-    head_counts = [train_ds.class_counts_head.get(i, 0) for i in range(NUM_CLASSES)]
-    hand_counts = [train_ds.class_counts_hand.get(i, 0) for i in range(NUM_CLASSES)]
+    head_counts = [train_ds.class_counts_head.get(i, 0) for i in range(HEAD_NUM_CLASSES)]
+    hand_counts = [train_ds.class_counts_hand.get(i, 0) for i in range(HAND_NUM_CLASSES)]
     class_weights_head = compute_class_weights(head_counts, cfg["loss"], device)
     class_weights_hand = compute_class_weights(hand_counts, cfg["loss"], device)
 
@@ -213,6 +217,8 @@ def main():
         transformer_cfg=cfg["model"].get("transformer", None),
         shared_backbone=cfg["model"].get("shared_backbone", False),
         shared_temporal=cfg["model"].get("shared_temporal", False),
+        num_head_classes=cfg["model"].get("num_head_classes", HEAD_NUM_CLASSES),
+        num_hand_classes=cfg["model"].get("num_hand_classes", HAND_NUM_CLASSES),
         freeze_backbone=cfg["model"]["freeze_backbone"],
         freeze_stages=cfg["model"].get("freeze_stages", -1),
         pretrained=cfg["model"].get("pretrained", True),

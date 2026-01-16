@@ -70,7 +70,7 @@ class MultiTaskPoseModel(nn.Module):
         shared_backbone: bool = False,
         shared_temporal: bool = False,
         num_head_classes: int = 5,
-        num_hand_classes: int = 5,
+        num_hand_classes: int = 4,
         freeze_backbone: bool = False,
         freeze_stages: int = -1,
         pretrained: bool = True,

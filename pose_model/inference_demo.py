@@ -13,6 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
+from pose_model.datasets.multimodal_sequence_dataset import HEAD_NUM_CLASSES, HAND_NUM_CLASSES
 from pose_model.models.multi_task_model import MultiTaskPoseModel
 
 LABEL_MAP = {0: "正", 1: "下", 2: "左", 3: "右", 4: "歪"}
@@ -85,6 +86,8 @@ def main():
         transformer_cfg=cfg["model"].get("transformer", None),
         shared_backbone=cfg["model"].get("shared_backbone", False),
         shared_temporal=cfg["model"].get("shared_temporal", False),
+        num_head_classes=cfg["model"].get("num_head_classes", HEAD_NUM_CLASSES),
+        num_hand_classes=cfg["model"].get("num_hand_classes", HAND_NUM_CLASSES),
         freeze_backbone=cfg["model"]["freeze_backbone"],
         freeze_stages=cfg["model"].get("freeze_stages", -1),
         pretrained=cfg["model"].get("pretrained", True),

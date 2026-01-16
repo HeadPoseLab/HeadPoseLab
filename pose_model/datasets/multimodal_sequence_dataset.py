@@ -10,7 +10,8 @@ import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
 
-NUM_CLASSES = 5
+HEAD_NUM_CLASSES = 5
+HAND_NUM_CLASSES = 4
 
 _INDEX_RE = re.compile(r"(\d+)")
 
@@ -150,14 +151,16 @@ class MultiPoseSequenceDataset(Dataset):
         for idx in common_indices:
             head_item = head_map[idx]
             hand_item = hand_map[idx]
+            head_label = self._validate_head_label(head_item.get("label"))
+            hand_label = self._remap_hand_label(hand_item.get("label"))
             head_image = head_root / "images" / head_item["image"]
             hand_image = hand_root / "images" / hand_item["image"]
             aligned.append(
                 (
                     head_image,
                     hand_image,
-                    head_item["label"],
-                    hand_item["label"],
+                    head_label,
+                    hand_label,
                     self._flatten_head_coords(head_item.get("keypoints", {})),
                     self._flatten_hand_coords(hand_item.get("keypoints", {})),
                 )
@@ -200,6 +203,22 @@ class MultiPoseSequenceDataset(Dataset):
             float(right.get("x", 0.0)),
             float(right.get("y", 0.0)),
         ]
+
+    @staticmethod
+    def _validate_head_label(label) -> int:
+        if not isinstance(label, int) or not (1 <= label <= HEAD_NUM_CLASSES):
+            raise ValueError(f"Invalid head label: {label}")
+        return label
+
+    @staticmethod
+    def _remap_hand_label(label) -> int:
+        if not isinstance(label, int):
+            raise ValueError(f"Invalid hand label: {label}")
+        if label == 2:
+            raise ValueError("Hand label 2 is not supported (class removed).")
+        if label < 1 or label > 5:
+            raise ValueError(f"Invalid hand label: {label}")
+        return label if label < 2 else label - 1
 
     def __len__(self):
         return len(self.samples)
