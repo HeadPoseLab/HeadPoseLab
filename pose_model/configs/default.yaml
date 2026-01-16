@@ -37,7 +37,7 @@ loss:
 
 # Optimization
 train:
-  epochs: 20
+  epochs: 80
   lr: 0.001
   backbone_lr_scale: 0.1
   weight_decay: 0.0001
