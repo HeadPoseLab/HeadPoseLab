@@ -13,8 +13,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from pose_model.datasets.sequence_dataset import PoseSequenceDataset, NUM_CLASSES
-from pose_model.models.cnn_lstm import CNNLSTMModel
+from pose_model.datasets.multimodal_sequence_dataset import MultiPoseSequenceDataset, NUM_CLASSES
+from pose_model.models.multi_task_model import MultiTaskPoseModel
 from pose_model.utils.logger import get_logger
 from pose_model.utils.losses import FocalLoss
 from pose_model.utils.metrics import sequence_accuracy, sequence_f1
@@ -22,7 +22,7 @@ from pose_model.utils.seed import set_seed
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train CNN+LSTM head pose model")
+    parser = argparse.ArgumentParser(description="Train head/hand pose model")
     parser.add_argument("--config", type=str, default="configs/default.yaml", help="Path to config yaml")
     return parser.parse_args()
 
@@ -56,7 +56,7 @@ def compute_class_weights(counts, loss_cfg, device):
 
 def build_dataset(cfg, mode: str, logger):
     try:
-        dataset = PoseSequenceDataset(
+        dataset = MultiPoseSequenceDataset(
             data_root=cfg["data_root"],
             mode=mode,
             sequence_length=cfg["sequence_length"],
@@ -65,6 +65,8 @@ def build_dataset(cfg, mode: str, logger):
             val_ratio=cfg["val_ratio"],
             seed=cfg["seed"],
             image_size=cfg["image_size"],
+            head_dir=cfg.get("head_dir", "head_pose"),
+            hand_dir=cfg.get("hand_dir", "hand_pose"),
         )
         return dataset
     except Exception as exc:  # noqa: BLE001
@@ -107,15 +109,31 @@ def build_dataloaders(cfg, logger):
     return train_loader, val_loader, train_ds, val_ds
 
 
-def train_one_epoch(model, loader, optimizer, criterion, device, logger, grad_clip=None, log_interval: int = 10):
+def train_one_epoch(
+    model,
+    loader,
+    optimizer,
+    criterion_head,
+    criterion_hand,
+    device,
+    logger,
+    grad_clip=None,
+    log_interval: int = 10,
+    head_weight: float = 1.0,
+    hand_weight: float = 1.0,
+):
     model.train()
     total_loss = 0.0
-    for step, (images, labels) in enumerate(loader, start=1):
-        images = images.to(device)
-        labels = labels.to(device)
+    for step, (head_images, hand_images, head_labels, hand_labels, _, _) in enumerate(loader, start=1):
+        head_images = head_images.to(device)
+        hand_images = hand_images.to(device)
+        head_labels = head_labels.to(device)
+        hand_labels = hand_labels.to(device)
 
-        logits, _ = model(images)
-        loss = criterion(logits.view(-1, NUM_CLASSES), labels.view(-1))
+        head_logits, hand_logits = model(head_images, hand_images)
+        head_loss = criterion_head(head_logits.view(-1, NUM_CLASSES), head_labels.view(-1))
+        hand_loss = criterion_hand(hand_logits.view(-1, NUM_CLASSES), hand_labels.view(-1))
+        loss = head_weight * head_loss + hand_weight * hand_loss
 
         optimizer.zero_grad()
         loss.backward()
@@ -126,25 +144,45 @@ def train_one_epoch(model, loader, optimizer, criterion, device, logger, grad_cl
         total_loss += loss.item()
 
         if logger and step % max(1, log_interval) == 0:
-            logger.info("step %d/%d | loss=%.4f", step, len(loader), loss.item())
+            logger.info(
+                "step %d/%d | loss=%.4f head=%.4f hand=%.4f",
+                step,
+                len(loader),
+                loss.item(),
+                head_loss.item(),
+                hand_loss.item(),
+            )
 
     return total_loss / len(loader)
 
 
-def evaluate(model, loader, criterion, device):
+def evaluate(model, loader, criterion_head, criterion_hand, device, head_weight: float, hand_weight: float):
     model.eval()
     total_loss = 0.0
-    accs, f1s = [], []
+    head_accs, hand_accs = [], []
+    head_f1s, hand_f1s = [], []
     with torch.no_grad():
-        for images, labels in loader:
-            images = images.to(device)
-            labels = labels.to(device)
-            logits, _ = model(images)
-            loss = criterion(logits.view(-1, NUM_CLASSES), labels.view(-1))
+        for head_images, hand_images, head_labels, hand_labels, _, _ in loader:
+            head_images = head_images.to(device)
+            hand_images = hand_images.to(device)
+            head_labels = head_labels.to(device)
+            hand_labels = hand_labels.to(device)
+            head_logits, hand_logits = model(head_images, hand_images)
+            head_loss = criterion_head(head_logits.view(-1, NUM_CLASSES), head_labels.view(-1))
+            hand_loss = criterion_hand(hand_logits.view(-1, NUM_CLASSES), hand_labels.view(-1))
+            loss = head_weight * head_loss + hand_weight * hand_loss
             total_loss += loss.item()
-            accs.append(sequence_accuracy(logits, labels))
-            f1s.append(sequence_f1(logits, labels))
-    return total_loss / len(loader), sum(accs) / len(accs), sum(f1s) / len(f1s)
+            head_accs.append(sequence_accuracy(head_logits, head_labels))
+            hand_accs.append(sequence_accuracy(hand_logits, hand_labels))
+            head_f1s.append(sequence_f1(head_logits, head_labels))
+            hand_f1s.append(sequence_f1(hand_logits, hand_labels))
+    return (
+        total_loss / len(loader),
+        sum(head_accs) / len(head_accs),
+        sum(hand_accs) / len(hand_accs),
+        sum(head_f1s) / len(head_f1s),
+        sum(hand_f1s) / len(hand_f1s),
+    )
 
 
 def main():
@@ -159,20 +197,26 @@ def main():
     logger.info("Using device: %s", device)
     train_loader, val_loader, train_ds, _ = build_dataloaders(cfg, logger)
 
-    class_counts = [train_ds.class_counts.get(i, 0) for i in range(NUM_CLASSES)]
-    class_weights = compute_class_weights(class_counts, cfg["loss"], device)
+    head_counts = [train_ds.class_counts_head.get(i, 0) for i in range(NUM_CLASSES)]
+    hand_counts = [train_ds.class_counts_hand.get(i, 0) for i in range(NUM_CLASSES)]
+    class_weights_head = compute_class_weights(head_counts, cfg["loss"], device)
+    class_weights_hand = compute_class_weights(hand_counts, cfg["loss"], device)
 
-    model = CNNLSTMModel(
+    model = MultiTaskPoseModel(
         backbone=cfg["model"]["backbone"],
         feature_dim=cfg["model"]["feature_dim"],
-        lstm_hidden=cfg["model"]["lstm_hidden"],
-        lstm_layers=cfg["model"]["lstm_layers"],
-        bidirectional=cfg["model"].get("bidirectional", False),
-        dropout=cfg["model"]["dropout"],
+        temporal_encoder=cfg["model"].get("temporal_encoder", "transformer"),
+        tcn_channels=cfg["model"].get("tcn_channels", None),
+        tcn_kernel=cfg["model"].get("tcn_kernel", 3),
+        tcn_dilations=cfg["model"].get("tcn_dilations", None),
+        tcn_dropout=cfg["model"].get("tcn_dropout", 0.2),
+        transformer_cfg=cfg["model"].get("transformer", None),
+        shared_backbone=cfg["model"].get("shared_backbone", False),
+        shared_temporal=cfg["model"].get("shared_temporal", False),
         freeze_backbone=cfg["model"]["freeze_backbone"],
         freeze_stages=cfg["model"].get("freeze_stages", -1),
         pretrained=cfg["model"].get("pretrained", True),
-        resnet_variant=cfg["model"].get("resnet_variant", "resnet18"),
+        resnet_variant=cfg["model"].get("resnet_variant", "resnet50"),
         cnn_branch_channels=cfg["model"].get("cnn_branch_channels", None),
         fusion=cfg["model"].get("fusion", "concat"),
         fusion_dropout=cfg["model"].get("fusion_dropout", 0.0),
@@ -181,23 +225,31 @@ def main():
     writer = SummaryWriter(log_dir=cfg["train"].get("log_dir", "runs"))
     try:
         model.eval()
-        example = torch.zeros(
+        example_head = torch.zeros(
+            1, cfg["sequence_length"], 3, cfg["image_size"], cfg["image_size"], device=device, dtype=torch.float32
+        )
+        example_hand = torch.zeros(
             1, cfg["sequence_length"], 3, cfg["image_size"], cfg["image_size"], device=device, dtype=torch.float32
         )
         with torch.no_grad():
-            writer.add_graph(model, example)
+            writer.add_graph(model, (example_head, example_hand))
         model.train()
     except Exception as exc:  # noqa: BLE001
         logger.warning("Skipping graph export to TensorBoard: %s", exc)
 
+    head_weight = cfg["loss"].get("head_weight", 1.0)
+    hand_weight = cfg["loss"].get("hand_weight", 1.0)
 
     if cfg["loss"]["type"] == "focal":
-        criterion = FocalLoss(gamma=cfg["loss"]["focal_gamma"], weight=class_weights)
+        criterion_head = FocalLoss(gamma=cfg["loss"]["focal_gamma"], weight=class_weights_head)
+        criterion_hand = FocalLoss(gamma=cfg["loss"]["focal_gamma"], weight=class_weights_hand)
     else:
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
+        criterion_head = nn.CrossEntropyLoss(weight=class_weights_head)
+        criterion_hand = nn.CrossEntropyLoss(weight=class_weights_hand)
     base_lr = cfg["train"]["lr"]
     backbone_lr_scale = cfg["train"].get("backbone_lr_scale", 0.1)
-    backbone_params = [p for p in model.backbone.parameters() if p.requires_grad]
+    backbone_modules = {model.backbone_head, model.backbone_hand}
+    backbone_params = [p for m in backbone_modules for p in m.parameters() if p.requires_grad]
     backbone_param_ids = {id(p) for p in backbone_params}
     other_params = [p for p in model.parameters() if p.requires_grad and id(p) not in backbone_param_ids]
     param_groups = []
@@ -213,22 +265,35 @@ def main():
             model,
             train_loader,
             optimizer,
-            criterion,
+            criterion_head,
+            criterion_hand,
             device,
             logger,
             grad_clip=cfg["train"]["grad_clip"],
             log_interval=cfg["train"]["log_interval"],
+            head_weight=head_weight,
+            hand_weight=hand_weight,
         )
 
         if val_loader:
-            val_loss, val_acc, val_f1 = evaluate(model, val_loader, criterion, device)
+            val_loss, head_acc, hand_acc, head_f1, hand_f1 = evaluate(
+                model,
+                val_loader,
+                criterion_head,
+                criterion_hand,
+                device,
+                head_weight,
+                hand_weight,
+            )
             logger.info(
-                "Epoch %d | train_loss=%.4f val_loss=%.4f val_acc=%.4f val_f1=%.4f",
+                "Epoch %d | train_loss=%.4f val_loss=%.4f head_acc=%.4f hand_acc=%.4f head_f1=%.4f hand_f1=%.4f",
                 epoch,
                 train_loss,
                 val_loss,
-                val_acc,
-                val_f1,
+                head_acc,
+                hand_acc,
+                head_f1,
+                hand_f1,
             )
             if val_loss < best_val_loss:
                 best_val_loss = val_loss

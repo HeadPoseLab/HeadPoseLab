@@ -11,8 +11,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from pose_model.datasets.sequence_dataset import PoseSequenceDataset, NUM_CLASSES
-from pose_model.models.cnn_lstm import CNNLSTMModel
+from pose_model.datasets.multimodal_sequence_dataset import MultiPoseSequenceDataset, NUM_CLASSES
+from pose_model.models.multi_task_model import MultiTaskPoseModel
 from pose_model.utils.logger import get_logger
 from pose_model.utils.losses import FocalLoss
 from pose_model.utils.metrics import confusion, per_class_accuracy, sequence_accuracy, sequence_f1
@@ -20,7 +20,7 @@ from pose_model.utils.seed import set_seed
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Evaluate CNN+LSTM head pose model")
+    parser = argparse.ArgumentParser(description="Evaluate head/hand pose model")
     parser.add_argument("--config", type=str, default="configs/default.yaml", help="Path to config yaml")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint")
     return parser.parse_args()
@@ -53,31 +53,47 @@ def compute_class_weights(counts, loss_cfg, device):
     return None
 
 
-def evaluate(model, loader, criterion, device):
+def evaluate(model, loader, criterion_head, criterion_hand, device, head_weight: float, hand_weight: float):
     model.eval()
     total_loss = 0.0
-    accs, f1s = [], []
-    all_logits, all_labels = [], []
+    head_accs, hand_accs = [], []
+    head_f1s, hand_f1s = [], []
+    head_logits_all, hand_logits_all = [], []
+    head_labels_all, hand_labels_all = [], []
     with torch.no_grad():
-        for images, labels in loader:
-            images = images.to(device)
-            labels = labels.to(device)
-            logits, _ = model(images)
-            loss = criterion(logits.view(-1, NUM_CLASSES), labels.view(-1))
+        for head_images, hand_images, head_labels, hand_labels, _, _ in loader:
+            head_images = head_images.to(device)
+            hand_images = hand_images.to(device)
+            head_labels = head_labels.to(device)
+            hand_labels = hand_labels.to(device)
+            head_logits, hand_logits = model(head_images, hand_images)
+            head_loss = criterion_head(head_logits.view(-1, NUM_CLASSES), head_labels.view(-1))
+            hand_loss = criterion_hand(hand_logits.view(-1, NUM_CLASSES), hand_labels.view(-1))
+            loss = head_weight * head_loss + hand_weight * hand_loss
             total_loss += loss.item()
-            accs.append(sequence_accuracy(logits, labels))
-            f1s.append(sequence_f1(logits, labels))
-            all_logits.append(logits.cpu())
-            all_labels.append(labels.cpu())
+            head_accs.append(sequence_accuracy(head_logits, head_labels))
+            hand_accs.append(sequence_accuracy(hand_logits, hand_labels))
+            head_f1s.append(sequence_f1(head_logits, head_labels))
+            hand_f1s.append(sequence_f1(hand_logits, hand_labels))
+            head_logits_all.append(head_logits.cpu())
+            hand_logits_all.append(hand_logits.cpu())
+            head_labels_all.append(head_labels.cpu())
+            hand_labels_all.append(hand_labels.cpu())
 
     avg_loss = total_loss / len(loader)
-    mean_acc = sum(accs) / len(accs)
-    mean_f1 = sum(f1s) / len(f1s)
-    logits_cat = torch.cat(all_logits, dim=0)
-    labels_cat = torch.cat(all_labels, dim=0)
-    cls_acc = per_class_accuracy(logits_cat, labels_cat, NUM_CLASSES)
-    cm = confusion(logits_cat, labels_cat, NUM_CLASSES)
-    return avg_loss, mean_acc, mean_f1, cls_acc, cm
+    mean_head_acc = sum(head_accs) / len(head_accs)
+    mean_hand_acc = sum(hand_accs) / len(hand_accs)
+    mean_head_f1 = sum(head_f1s) / len(head_f1s)
+    mean_hand_f1 = sum(hand_f1s) / len(hand_f1s)
+    head_logits_cat = torch.cat(head_logits_all, dim=0)
+    hand_logits_cat = torch.cat(hand_logits_all, dim=0)
+    head_labels_cat = torch.cat(head_labels_all, dim=0)
+    hand_labels_cat = torch.cat(hand_labels_all, dim=0)
+    head_cls_acc = per_class_accuracy(head_logits_cat, head_labels_cat, NUM_CLASSES)
+    hand_cls_acc = per_class_accuracy(hand_logits_cat, hand_labels_cat, NUM_CLASSES)
+    head_cm = confusion(head_logits_cat, head_labels_cat, NUM_CLASSES)
+    hand_cm = confusion(hand_logits_cat, hand_labels_cat, NUM_CLASSES)
+    return avg_loss, mean_head_acc, mean_hand_acc, mean_head_f1, mean_hand_f1, head_cls_acc, hand_cls_acc, head_cm, hand_cm
 
 
 def main():
@@ -91,7 +107,7 @@ def main():
     if not checkpoint_path or not Path(checkpoint_path).exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-    dataset = PoseSequenceDataset(
+    dataset = MultiPoseSequenceDataset(
         data_root=cfg["data_root"],
         mode="test",
         sequence_length=cfg["sequence_length"],
@@ -100,20 +116,26 @@ def main():
         val_ratio=cfg["val_ratio"],
         seed=cfg["seed"],
         image_size=cfg["image_size"],
+        head_dir=cfg.get("head_dir", "head_pose"),
+        hand_dir=cfg.get("hand_dir", "hand_pose"),
     )
     loader = DataLoader(dataset, batch_size=cfg["batch_size"], shuffle=False, num_workers=cfg["num_workers"])
 
-    model = CNNLSTMModel(
+    model = MultiTaskPoseModel(
         backbone=cfg["model"]["backbone"],
         feature_dim=cfg["model"]["feature_dim"],
-        lstm_hidden=cfg["model"]["lstm_hidden"],
-        lstm_layers=cfg["model"]["lstm_layers"],
-        bidirectional=cfg["model"].get("bidirectional", False),
-        dropout=cfg["model"]["dropout"],
+        temporal_encoder=cfg["model"].get("temporal_encoder", "transformer"),
+        tcn_channels=cfg["model"].get("tcn_channels", None),
+        tcn_kernel=cfg["model"].get("tcn_kernel", 3),
+        tcn_dilations=cfg["model"].get("tcn_dilations", None),
+        tcn_dropout=cfg["model"].get("tcn_dropout", 0.2),
+        transformer_cfg=cfg["model"].get("transformer", None),
+        shared_backbone=cfg["model"].get("shared_backbone", False),
+        shared_temporal=cfg["model"].get("shared_temporal", False),
         freeze_backbone=cfg["model"]["freeze_backbone"],
         freeze_stages=cfg["model"].get("freeze_stages", -1),
         pretrained=cfg["model"].get("pretrained", True),
-        resnet_variant=cfg["model"].get("resnet_variant", "resnet18"),
+        resnet_variant=cfg["model"].get("resnet_variant", "resnet50"),
         cnn_branch_channels=cfg["model"].get("cnn_branch_channels", None),
         fusion=cfg["model"].get("fusion", "concat"),
         fusion_dropout=cfg["model"].get("fusion_dropout", 0.0),
@@ -123,16 +145,34 @@ def main():
     model.load_state_dict(checkpoint["model_state"])
     logger.info("Loaded checkpoint from %s", checkpoint_path)
 
-    class_counts = [dataset.class_counts.get(i, 0) for i in range(NUM_CLASSES)]
-    class_weights = compute_class_weights(class_counts, cfg["loss"], device)
+    head_counts = [dataset.class_counts_head.get(i, 0) for i in range(NUM_CLASSES)]
+    hand_counts = [dataset.class_counts_hand.get(i, 0) for i in range(NUM_CLASSES)]
+    class_weights_head = compute_class_weights(head_counts, cfg["loss"], device)
+    class_weights_hand = compute_class_weights(hand_counts, cfg["loss"], device)
+    head_weight = cfg["loss"].get("head_weight", 1.0)
+    hand_weight = cfg["loss"].get("hand_weight", 1.0)
     if cfg["loss"]["type"] == "focal":
-        criterion = FocalLoss(gamma=cfg["loss"]["focal_gamma"], weight=class_weights)
+        criterion_head = FocalLoss(gamma=cfg["loss"]["focal_gamma"], weight=class_weights_head)
+        criterion_hand = FocalLoss(gamma=cfg["loss"]["focal_gamma"], weight=class_weights_hand)
     else:
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
-    loss, acc, f1, cls_acc, cm = evaluate(model, loader, criterion, device)
-    logger.info("Test loss=%.4f acc=%.4f f1=%.4f", loss, acc, f1)
-    logger.info("Per-class accuracy (0-6): %s", ["{:.3f}".format(x) for x in cls_acc])
-    logger.info("Confusion matrix:\n%s", cm)
+        criterion_head = nn.CrossEntropyLoss(weight=class_weights_head)
+        criterion_hand = nn.CrossEntropyLoss(weight=class_weights_hand)
+    (
+        loss,
+        head_acc,
+        hand_acc,
+        head_f1,
+        hand_f1,
+        head_cls_acc,
+        hand_cls_acc,
+        head_cm,
+        hand_cm,
+    ) = evaluate(model, loader, criterion_head, criterion_hand, device, head_weight, hand_weight)
+    logger.info("Test loss=%.4f head_acc=%.4f hand_acc=%.4f head_f1=%.4f hand_f1=%.4f", loss, head_acc, hand_acc, head_f1, hand_f1)
+    logger.info("Head per-class accuracy (0-6): %s", ["{:.3f}".format(x) for x in head_cls_acc])
+    logger.info("Hand per-class accuracy (0-6): %s", ["{:.3f}".format(x) for x in hand_cls_acc])
+    logger.info("Head confusion matrix:\n%s", head_cm)
+    logger.info("Hand confusion matrix:\n%s", hand_cm)
 
 
 if __name__ == "__main__":
