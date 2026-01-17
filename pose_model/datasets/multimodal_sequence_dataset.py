@@ -45,6 +45,8 @@ class MultiPoseSequenceDataset(Dataset):
         transform=None,
         head_dir: str = "head_pose",
         hand_dir: str = "hand_pose",
+        sample_weight_head: float = 0.5,
+        sample_weight_hand: float = 0.5,
     ):
         super().__init__()
         self.data_root = Path(data_root)
@@ -60,6 +62,8 @@ class MultiPoseSequenceDataset(Dataset):
         )
         self.head_dir = head_dir
         self.hand_dir = hand_dir
+        self.sample_weight_head = float(sample_weight_head)
+        self.sample_weight_hand = float(sample_weight_hand)
 
         if not self.data_root.exists():
             raise FileNotFoundError(f"data_root not found: {self.data_root}")
@@ -124,12 +128,18 @@ class MultiPoseSequenceDataset(Dataset):
         self.class_counts_head = head_counter
         self.class_counts_hand = hand_counter
         if self.class_counts_head and self.class_counts_hand:
+            weight_total = self.sample_weight_head + self.sample_weight_hand
+            if weight_total <= 0:
+                weight_total = 1.0
             for _, _, head_labels, hand_labels, _, _ in self.samples:
                 head_weights = [1.0 / max(1, self.class_counts_head[label]) for label in head_labels]
                 hand_weights = [1.0 / max(1, self.class_counts_hand[label]) for label in hand_labels]
                 avg_head = sum(head_weights) / len(head_weights)
                 avg_hand = sum(hand_weights) / len(hand_weights)
-                self.sample_weights.append((avg_head + avg_hand) / 2.0)
+                weighted = (
+                    self.sample_weight_head * avg_head + self.sample_weight_hand * avg_hand
+                ) / weight_total
+                self.sample_weights.append(weighted)
 
     def _read_aligned_entries(
         self, person_dir: Path

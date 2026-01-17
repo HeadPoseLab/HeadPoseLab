@@ -60,6 +60,7 @@ def compute_class_weights(counts, loss_cfg, device):
 
 def build_dataset(cfg, mode: str, logger):
     try:
+        sampler_cfg = cfg.get("sampler", {})
         dataset = MultiPoseSequenceDataset(
             data_root=cfg["data_root"],
             mode=mode,
@@ -71,6 +72,8 @@ def build_dataset(cfg, mode: str, logger):
             image_size=cfg["image_size"],
             head_dir=cfg.get("head_dir", "head_pose"),
             hand_dir=cfg.get("hand_dir", "hand_pose"),
+            sample_weight_head=sampler_cfg.get("sample_weight_head", 0.5),
+            sample_weight_hand=sampler_cfg.get("sample_weight_hand", 0.5),
         )
         return dataset
     except Exception as exc:  # noqa: BLE001
@@ -210,13 +213,28 @@ def main():
         backbone=cfg["model"]["backbone"],
         feature_dim=cfg["model"]["feature_dim"],
         temporal_encoder=cfg["model"].get("temporal_encoder", "transformer"),
+        head_temporal_encoder=cfg["model"].get("head_temporal_encoder", None),
+        hand_temporal_encoder=cfg["model"].get("hand_temporal_encoder", None),
         tcn_channels=cfg["model"].get("tcn_channels", None),
         tcn_kernel=cfg["model"].get("tcn_kernel", 3),
         tcn_dilations=cfg["model"].get("tcn_dilations", None),
         tcn_dropout=cfg["model"].get("tcn_dropout", 0.2),
+        head_tcn_channels=cfg["model"].get("head_tcn_channels", None),
+        hand_tcn_channels=cfg["model"].get("hand_tcn_channels", None),
+        head_tcn_kernel=cfg["model"].get("head_tcn_kernel", None),
+        hand_tcn_kernel=cfg["model"].get("hand_tcn_kernel", None),
+        head_tcn_dilations=cfg["model"].get("head_tcn_dilations", None),
+        hand_tcn_dilations=cfg["model"].get("hand_tcn_dilations", None),
+        head_tcn_dropout=cfg["model"].get("head_tcn_dropout", None),
+        hand_tcn_dropout=cfg["model"].get("hand_tcn_dropout", None),
         transformer_cfg=cfg["model"].get("transformer", None),
+        head_transformer_cfg=cfg["model"].get("head_transformer", None),
+        hand_transformer_cfg=cfg["model"].get("hand_transformer", None),
         shared_backbone=cfg["model"].get("shared_backbone", False),
         shared_temporal=cfg["model"].get("shared_temporal", False),
+        adapter_enabled=cfg["model"].get("adapter", {}).get("enabled", False),
+        adapter_dim=cfg["model"].get("adapter", {}).get("dim", None),
+        adapter_dropout=cfg["model"].get("adapter", {}).get("dropout", 0.1),
         num_head_classes=cfg["model"].get("num_head_classes", HEAD_NUM_CLASSES),
         num_hand_classes=cfg["model"].get("num_hand_classes", HAND_NUM_CLASSES),
         freeze_backbone=cfg["model"]["freeze_backbone"],
@@ -245,12 +263,20 @@ def main():
 
     head_weight = cfg["loss"].get("head_weight", 1.0)
     hand_weight = cfg["loss"].get("hand_weight", 1.0)
+    loss_cfg = cfg["loss"]
+    head_loss_type = loss_cfg.get("head_type", loss_cfg.get("type", "cross_entropy"))
+    hand_loss_type = loss_cfg.get("hand_type", loss_cfg.get("type", "cross_entropy"))
+    head_gamma = loss_cfg.get("head_focal_gamma", loss_cfg.get("focal_gamma", 2.0))
+    hand_gamma = loss_cfg.get("hand_focal_gamma", loss_cfg.get("focal_gamma", 2.0))
 
-    if cfg["loss"]["type"] == "focal":
-        criterion_head = FocalLoss(gamma=cfg["loss"]["focal_gamma"], weight=class_weights_head)
-        criterion_hand = FocalLoss(gamma=cfg["loss"]["focal_gamma"], weight=class_weights_hand)
+    if head_loss_type == "focal":
+        criterion_head = FocalLoss(gamma=head_gamma, weight=class_weights_head)
     else:
         criterion_head = nn.CrossEntropyLoss(weight=class_weights_head)
+
+    if hand_loss_type == "focal":
+        criterion_hand = FocalLoss(gamma=hand_gamma, weight=class_weights_hand)
+    else:
         criterion_hand = nn.CrossEntropyLoss(weight=class_weights_hand)
     base_lr = cfg["train"]["lr"]
     backbone_lr_scale = cfg["train"].get("backbone_lr_scale", 0.1)

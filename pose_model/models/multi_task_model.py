@@ -56,19 +56,51 @@ class TCNTemporal(nn.Module):
         return self.tcn(x)
 
 
+class BranchAdapter(nn.Module):
+    def __init__(self, feature_dim: int, adapter_dim: int | None = None, dropout: float = 0.1):
+        super().__init__()
+        hidden_dim = adapter_dim or feature_dim
+        self.net = nn.Sequential(
+            nn.Linear(feature_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, feature_dim),
+            nn.LayerNorm(feature_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Residual adapter on [B, T, D]
+        return x + self.net(x)
+
+
 class MultiTaskPoseModel(nn.Module):
     def __init__(
         self,
         backbone: str = "simple_cnn",
         feature_dim: int = 128,
         temporal_encoder: str = "transformer",
+        head_temporal_encoder: str | None = None,
+        hand_temporal_encoder: str | None = None,
         tcn_channels: Sequence[int] | None = None,
         tcn_kernel: int = 3,
         tcn_dilations: Sequence[int] | None = None,
         tcn_dropout: float = 0.2,
+        head_tcn_channels: Sequence[int] | None = None,
+        hand_tcn_channels: Sequence[int] | None = None,
+        head_tcn_kernel: int | None = None,
+        hand_tcn_kernel: int | None = None,
+        head_tcn_dilations: Sequence[int] | None = None,
+        hand_tcn_dilations: Sequence[int] | None = None,
+        head_tcn_dropout: float | None = None,
+        hand_tcn_dropout: float | None = None,
         transformer_cfg: dict | None = None,
+        head_transformer_cfg: dict | None = None,
+        hand_transformer_cfg: dict | None = None,
         shared_backbone: bool = False,
         shared_temporal: bool = False,
+        adapter_enabled: bool = False,
+        adapter_dim: int | None = None,
+        adapter_dropout: float = 0.1,
         num_head_classes: int = 5,
         num_hand_classes: int = 4,
         freeze_backbone: bool = False,
@@ -105,25 +137,63 @@ class MultiTaskPoseModel(nn.Module):
             fusion_dropout=fusion_dropout,
         )
 
-        transformer_cfg = transformer_cfg or {}
-        if self.temporal_encoder == "tcn":
-            temporal_head = TCNTemporal(feature_dim, tcn_channels, tcn_kernel, tcn_dilations, tcn_dropout)
-        elif self.temporal_encoder == "transformer":
-            temporal_head = TransformerTemporal(feature_dim, transformer_cfg)
-        else:
-            raise ValueError(f"Unsupported temporal_encoder: {temporal_encoder} (only tcn or transformer supported)")
+        self.head_adapter = BranchAdapter(feature_dim, adapter_dim, adapter_dropout) if adapter_enabled else nn.Identity()
+        self.hand_adapter = BranchAdapter(feature_dim, adapter_dim, adapter_dropout) if adapter_enabled else nn.Identity()
 
-        self.temporal_head = temporal_head
-        self.temporal_hand = temporal_head if shared_temporal else self._clone_temporal(
-            temporal_head, feature_dim, tcn_channels, tcn_kernel, tcn_dilations, tcn_dropout, transformer_cfg
-        )
+        head_encoder = (head_temporal_encoder or temporal_encoder).lower()
+        hand_encoder = (hand_temporal_encoder or temporal_encoder).lower()
+
+        base_transformer_cfg = transformer_cfg or {}
+        head_transformer_cfg = head_transformer_cfg or base_transformer_cfg
+        hand_transformer_cfg = hand_transformer_cfg or base_transformer_cfg
+
+        head_tcn_channels = head_tcn_channels or tcn_channels
+        hand_tcn_channels = hand_tcn_channels or tcn_channels
+        head_tcn_kernel = head_tcn_kernel or tcn_kernel
+        hand_tcn_kernel = hand_tcn_kernel or tcn_kernel
+        head_tcn_dilations = head_tcn_dilations or tcn_dilations
+        hand_tcn_dilations = hand_tcn_dilations or tcn_dilations
+        head_tcn_dropout = head_tcn_dropout if head_tcn_dropout is not None else tcn_dropout
+        hand_tcn_dropout = hand_tcn_dropout if hand_tcn_dropout is not None else tcn_dropout
+
+        if shared_temporal and head_encoder == hand_encoder:
+            temporal_head = self._build_temporal(
+                head_encoder,
+                feature_dim,
+                head_tcn_channels,
+                head_tcn_kernel,
+                head_tcn_dilations,
+                head_tcn_dropout,
+                head_transformer_cfg,
+            )
+            self.temporal_head = temporal_head
+            self.temporal_hand = temporal_head
+        else:
+            self.temporal_head = self._build_temporal(
+                head_encoder,
+                feature_dim,
+                head_tcn_channels,
+                head_tcn_kernel,
+                head_tcn_dilations,
+                head_tcn_dropout,
+                head_transformer_cfg,
+            )
+            self.temporal_hand = self._build_temporal(
+                hand_encoder,
+                feature_dim,
+                hand_tcn_channels,
+                hand_tcn_kernel,
+                hand_tcn_dilations,
+                hand_tcn_dropout,
+                hand_transformer_cfg,
+            )
 
         self.head_classifier = nn.Linear(self.temporal_head.output_dim, num_head_classes)
         self.hand_classifier = nn.Linear(self.temporal_hand.output_dim, num_hand_classes)
 
-    def _clone_temporal(
-        self,
-        base_temporal: nn.Module,
+    @staticmethod
+    def _build_temporal(
+        encoder: str,
         feature_dim: int,
         tcn_channels: Sequence[int] | None,
         tcn_kernel: int,
@@ -131,8 +201,10 @@ class MultiTaskPoseModel(nn.Module):
         tcn_dropout: float,
         transformer_cfg: dict,
     ) -> nn.Module:
-        if isinstance(base_temporal, TCNTemporal):
+        if encoder == "tcn":
             return TCNTemporal(feature_dim, tcn_channels, tcn_kernel, tcn_dilations, tcn_dropout)
+        if encoder == "transformer":
+            return TransformerTemporal(feature_dim, transformer_cfg)
         return TransformerTemporal(feature_dim, transformer_cfg)
 
     @staticmethod
@@ -144,6 +216,9 @@ class MultiTaskPoseModel(nn.Module):
     def forward(self, head_images: torch.Tensor, hand_images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         head_features = self._extract_features(self.backbone_head, head_images)
         hand_features = self._extract_features(self.backbone_hand, hand_images)
+
+        head_features = self.head_adapter(head_features)
+        hand_features = self.hand_adapter(hand_features)
 
         head_encoded = self.temporal_head(head_features)
         hand_encoded = self.temporal_hand(hand_features)

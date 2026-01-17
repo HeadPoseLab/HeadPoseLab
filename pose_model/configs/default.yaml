@@ -2,10 +2,10 @@
 data_root: ./data
 head_dir: head_pose
 hand_dir: hand_pose
-sequence_length: 12
-overlap: true
-train_ratio: 0.8
-val_ratio: 0.1
+sequence_length: 16
+overlap: true  # use sliding window with stride 1 to enlarge samples
+train_ratio: 0.7
+val_ratio: 0.15
 seed: 42
 image_size: 128
 
@@ -14,59 +14,74 @@ batch_size: 8
 num_workers: 4
 sampler:
   balanced: true
+  sample_weight_head: 0.1
+  sample_weight_hand: 0.9
 
 # Model
 model:
-  backbone: hybrid_cnn_resnet
+  backbone: hybrid_cnn_resnet  # hybrid_cnn_resnet
   resnet_variant: resnet50
   cnn_branch_channels: [32, 64, 128]
-  feature_dim: 256
-  fusion: concat
-  fusion_dropout: 0.05
-  shared_backbone: true
-  shared_temporal: false
+  feature_dim: 256             # fused feature dim after CNN+ResNet
+  fusion: concat               # concat or sum
+  fusion_dropout: 0.1
+  shared_backbone: false       # share backbone weights for head/hand streams
+  shared_temporal: false       # share temporal encoder for head/hand streams
+  adapter:
+    enabled: true
+    dim: 384
+    dropout: 0.05
   num_head_classes: 5
-  num_hand_classes: 4
-  temporal_encoder: transformer
+  num_hand_classes: 4          # hand class 2 is removed
+  temporal_encoder: transformer # options: tcn, transformer
+  head_temporal_encoder: transformer
+  hand_temporal_encoder: tcn
   tcn_channels: [192, 192]
   tcn_kernel: 3
   tcn_dilations: [1, 2]
   tcn_dropout: 0.2
+  hand_tcn_channels: [256, 256, 256]
+  hand_tcn_kernel: 3
+  hand_tcn_dilations: [1, 2, 4, 8]
+  hand_tcn_dropout: 0.2
   transformer:
-    input_dim: 256
-    num_layers: 3
-    nhead: 8
-    dim_feedforward: 768
-    dropout: 0.2
+    input_dim: null            # optional override; defaults to feature_dim
+    num_layers: 2
+    nhead: 4
+    dim_feedforward: 512
+    dropout: 0.1
     activation: relu
     use_positional_encoding: true
     pos_encoding: learned
     pre_norm: true
     max_len: 256
   freeze_backbone: false
-  freeze_stages: 1
+  freeze_stages: 1  # -1: no freeze, 0: stem, 1: stem+layer1, 2: +layer2, 3: +layer3, 4: full backbone
   pretrained: true
 
 # Loss
 loss:
-  type: focal
-  class_weights: auto
-  focal_gamma: 1.5
+  type: cross_entropy  # options: cross_entropy, focal
+  head_type: cross_entropy
+  hand_type: focal
+  class_weights: auto  # auto, none, or explicit list e.g. [1,1,1,1,1,1,1]
+  focal_gamma: 2.0
+  hand_focal_gamma: 2.5
   head_weight: 1.0
-  hand_weight: 1.2
+  hand_weight: 1.5
 
 # Optimization
 train:
-  epochs: 100
-  lr: 0.0007
+  epochs: 20
+  lr: 0.0008
   backbone_lr_scale: 0.05
   weight_decay: 0.0001
   grad_clip: 5.0
   device: auto
-  save_dir: ./checkpoints
+  save_dir: ./checkpoints/exp_hand_bias_v2
   log_interval: 10
   log_dir: ./runs
 
 # Evaluation
 eval:
-  checkpoint: ./checkpoints/best.pt
+  checkpoint: ./checkpoints/exp_hand_bias_v2/best.pt
