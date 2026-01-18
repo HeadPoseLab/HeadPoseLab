@@ -14,8 +14,8 @@ batch_size: 8
 num_workers: 4
 sampler:
   balanced: true
-  sample_weight_head: 0.1
-  sample_weight_hand: 0.9
+  sample_weight_head: 0.3
+  sample_weight_hand: 0.7
 
 # Model
 model:
@@ -40,7 +40,7 @@ model:
   tcn_kernel: 3
   tcn_dilations: [1, 2]
   tcn_dropout: 0.2
-  hand_tcn_channels: [256, 256, 256]
+  hand_tcn_channels: [256, 256, 256, 256]
   hand_tcn_kernel: 3
   hand_tcn_dilations: [1, 2, 4, 8]
   hand_tcn_dropout: 0.2
@@ -66,13 +66,13 @@ loss:
   hand_type: focal
   class_weights: auto  # auto, none, or explicit list e.g. [1,1,1,1,1,1,1]
   focal_gamma: 2.0
-  hand_focal_gamma: 2.5
+  hand_focal_gamma: 2.0
   head_weight: 1.0
-  hand_weight: 1.5
+  hand_weight: 1.2
 
 # Optimization
 train:
-  epochs: 20
+  epochs: 30
   lr: 0.0008
   backbone_lr_scale: 0.05
   weight_decay: 0.0001
