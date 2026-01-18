@@ -25,12 +25,12 @@ model:
   feature_dim: 256             # fused feature dim after CNN+ResNet
   fusion: concat               # concat or sum
   fusion_dropout: 0.1
-  shared_backbone: false       # share backbone weights for head/hand streams
+  shared_backbone: true        # share backbone weights for head/hand streams
   shared_temporal: false       # share temporal encoder for head/hand streams
   adapter:
     enabled: true
-    dim: 384
-    dropout: 0.05
+    dim: 256
+    dropout: 0.1
   num_head_classes: 5
   num_hand_classes: 4          # hand class 2 is removed
   temporal_encoder: transformer # options: tcn, transformer
@@ -78,10 +78,10 @@ train:
   weight_decay: 0.0001
   grad_clip: 5.0
   device: auto
-  save_dir: ./checkpoints/exp_step2_hand_tcn_slim
+  save_dir: ./checkpoints/exp_step3_shared_backbone
   log_interval: 10
   log_dir: ./runs
 
 # Evaluation
 eval:
-  checkpoint: ./checkpoints/exp_step2_hand_tcn_slim/best.pt
+  checkpoint: ./checkpoints/exp_step3_shared_backbone/best.pt
