@@ -6,6 +6,7 @@ import torch
 import yaml
 from torch import nn
 from torch.utils.data import DataLoader
+from sklearn.metrics import confusion_matrix, f1_score
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -27,6 +28,18 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate head/hand pose model")
     parser.add_argument("--config", type=str, default="configs/default.yaml", help="Path to config yaml")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint")
+    parser.add_argument(
+        "--hand_unknown_threshold",
+        type=float,
+        default=None,
+        help="If set, map low-confidence hand predictions to unknown class",
+    )
+    parser.add_argument(
+        "--hand_unknown_class",
+        type=int,
+        default=None,
+        help="1-based hand class id to use as unknown (default: last class)",
+    )
     return parser.parse_args()
 
 
@@ -57,13 +70,48 @@ def compute_class_weights(counts, loss_cfg, device):
     return None
 
 
-def evaluate(model, loader, criterion_head, criterion_hand, device, head_weight: float, hand_weight: float):
+def _apply_unknown_threshold(logits: torch.Tensor, threshold: float, unknown_index: int) -> torch.Tensor:
+    probs = torch.softmax(logits, dim=-1)
+    max_probs, preds = probs.max(dim=-1)
+    preds = preds.clone()
+    preds[max_probs < threshold] = unknown_index
+    return preds
+
+
+def _metrics_from_preds(preds: torch.Tensor, labels: torch.Tensor, num_classes: int):
+    acc = (preds == labels).float().mean().item()
+    y_pred = preds.detach().cpu().flatten().numpy()
+    y_true = labels.detach().cpu().flatten().numpy()
+    f1 = f1_score(y_true, y_pred, average="macro")
+    cls_acc = []
+    for cls in range(num_classes):
+        mask = labels == cls
+        if mask.any():
+            cls_acc.append((preds[mask] == labels[mask]).float().mean().item())
+        else:
+            cls_acc.append(float("nan"))
+    cm = confusion_matrix(y_true, y_pred, labels=list(range(num_classes)))
+    return acc, f1, cls_acc, cm
+
+
+def evaluate(
+    model,
+    loader,
+    criterion_head,
+    criterion_hand,
+    device,
+    head_weight: float,
+    hand_weight: float,
+    hand_unknown_threshold: float,
+    hand_unknown_index: int,
+):
     model.eval()
     total_loss = 0.0
     head_accs, hand_accs = [], []
     head_f1s, hand_f1s = [], []
     head_logits_all, hand_logits_all = [], []
     head_labels_all, hand_labels_all = [], []
+    hand_preds_all = []
     with torch.no_grad():
         for head_images, hand_images, head_labels, hand_labels, _, _ in loader:
             head_images = head_images.to(device)
@@ -76,27 +124,39 @@ def evaluate(model, loader, criterion_head, criterion_hand, device, head_weight:
             loss = head_weight * head_loss + hand_weight * hand_loss
             total_loss += loss.item()
             head_accs.append(sequence_accuracy(head_logits, head_labels))
-            hand_accs.append(sequence_accuracy(hand_logits, hand_labels))
+            if hand_unknown_threshold > 0:
+                hand_preds = _apply_unknown_threshold(hand_logits, hand_unknown_threshold, hand_unknown_index)
+                hand_preds_all.append(hand_preds.cpu())
+                hand_labels_all.append(hand_labels.cpu())
+            else:
+                hand_accs.append(sequence_accuracy(hand_logits, hand_labels))
+                hand_f1s.append(sequence_f1(hand_logits, hand_labels))
+                hand_logits_all.append(hand_logits.cpu())
+                hand_labels_all.append(hand_labels.cpu())
             head_f1s.append(sequence_f1(head_logits, head_labels))
-            hand_f1s.append(sequence_f1(hand_logits, hand_labels))
             head_logits_all.append(head_logits.cpu())
-            hand_logits_all.append(hand_logits.cpu())
             head_labels_all.append(head_labels.cpu())
-            hand_labels_all.append(hand_labels.cpu())
 
     avg_loss = total_loss / len(loader)
     mean_head_acc = sum(head_accs) / len(head_accs)
-    mean_hand_acc = sum(hand_accs) / len(hand_accs)
     mean_head_f1 = sum(head_f1s) / len(head_f1s)
-    mean_hand_f1 = sum(hand_f1s) / len(hand_f1s)
     head_logits_cat = torch.cat(head_logits_all, dim=0)
-    hand_logits_cat = torch.cat(hand_logits_all, dim=0)
     head_labels_cat = torch.cat(head_labels_all, dim=0)
-    hand_labels_cat = torch.cat(hand_labels_all, dim=0)
     head_cls_acc = per_class_accuracy(head_logits_cat, head_labels_cat, HEAD_NUM_CLASSES)
-    hand_cls_acc = per_class_accuracy(hand_logits_cat, hand_labels_cat, HAND_NUM_CLASSES)
     head_cm = confusion(head_logits_cat, head_labels_cat, HEAD_NUM_CLASSES)
-    hand_cm = confusion(hand_logits_cat, hand_labels_cat, HAND_NUM_CLASSES)
+    if hand_unknown_threshold > 0:
+        hand_preds_cat = torch.cat(hand_preds_all, dim=0)
+        hand_labels_cat = torch.cat(hand_labels_all, dim=0)
+        mean_hand_acc, mean_hand_f1, hand_cls_acc, hand_cm = _metrics_from_preds(
+            hand_preds_cat, hand_labels_cat, HAND_NUM_CLASSES
+        )
+    else:
+        mean_hand_acc = sum(hand_accs) / len(hand_accs)
+        mean_hand_f1 = sum(hand_f1s) / len(hand_f1s)
+        hand_logits_cat = torch.cat(hand_logits_all, dim=0)
+        hand_labels_cat = torch.cat(hand_labels_all, dim=0)
+        hand_cls_acc = per_class_accuracy(hand_logits_cat, hand_labels_cat, HAND_NUM_CLASSES)
+        hand_cm = confusion(hand_logits_cat, hand_labels_cat, HAND_NUM_CLASSES)
     return avg_loss, mean_head_acc, mean_hand_acc, mean_head_f1, mean_hand_f1, head_cls_acc, hand_cls_acc, head_cm, hand_cm
 
 
@@ -106,6 +166,14 @@ def main():
     logger = get_logger()
     set_seed(cfg["seed"])
     device = resolve_device(cfg["train"]["device"])
+    eval_cfg = cfg.get("eval", {})
+    hand_unknown_threshold = args.hand_unknown_threshold
+    if hand_unknown_threshold is None:
+        hand_unknown_threshold = float(eval_cfg.get("hand_unknown_threshold", 0.0))
+    hand_unknown_class = args.hand_unknown_class
+    if hand_unknown_class is None:
+        hand_unknown_class = int(eval_cfg.get("hand_unknown_class", HAND_NUM_CLASSES))
+    hand_unknown_index = max(0, min(hand_unknown_class - 1, HAND_NUM_CLASSES - 1))
 
     checkpoint_path = args.checkpoint or cfg["eval"]["checkpoint"]
     if not checkpoint_path or not Path(checkpoint_path).exists():
@@ -168,6 +236,12 @@ def main():
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint["model_state"])
     logger.info("Loaded checkpoint from %s", checkpoint_path)
+    if hand_unknown_threshold and hand_unknown_threshold > 0:
+        logger.info(
+            "Applying hand unknown threshold %.3f -> class %d",
+            hand_unknown_threshold,
+            hand_unknown_class,
+        )
 
     head_counts = [dataset.class_counts_head.get(i, 0) for i in range(HEAD_NUM_CLASSES)]
     hand_counts = [dataset.class_counts_hand.get(i, 0) for i in range(HAND_NUM_CLASSES)]
@@ -198,7 +272,17 @@ def main():
         hand_cls_acc,
         head_cm,
         hand_cm,
-    ) = evaluate(model, loader, criterion_head, criterion_hand, device, head_weight, hand_weight)
+    ) = evaluate(
+        model,
+        loader,
+        criterion_head,
+        criterion_hand,
+        device,
+        head_weight,
+        hand_weight,
+        hand_unknown_threshold,
+        hand_unknown_index,
+    )
     logger.info("Test loss=%.4f head_acc=%.4f hand_acc=%.4f head_f1=%.4f hand_f1=%.4f", loss, head_acc, hand_acc, head_f1, hand_f1)
     logger.info(
         "Head per-class accuracy (0-%d): %s",
