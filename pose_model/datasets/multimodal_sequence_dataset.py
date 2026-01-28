@@ -47,6 +47,9 @@ class MultiPoseSequenceDataset(Dataset):
         hand_dir: str = "hand_pose",
         sample_weight_head: float = 0.5,
         sample_weight_hand: float = 0.5,
+        hand_roi_enabled: bool = False,
+        hand_roi_expand: float = 1.6,
+        hand_roi_min_scale: float = 0.2,
     ):
         super().__init__()
         self.data_root = Path(data_root)
@@ -64,6 +67,9 @@ class MultiPoseSequenceDataset(Dataset):
         self.hand_dir = hand_dir
         self.sample_weight_head = float(sample_weight_head)
         self.sample_weight_hand = float(sample_weight_hand)
+        self.hand_roi_enabled = bool(hand_roi_enabled)
+        self.hand_roi_expand = float(hand_roi_expand)
+        self.hand_roi_min_scale = float(hand_roi_min_scale)
 
         if not self.data_root.exists():
             raise FileNotFoundError(f"data_root not found: {self.data_root}")
@@ -236,7 +242,12 @@ class MultiPoseSequenceDataset(Dataset):
     def __getitem__(self, idx):
         head_paths, hand_paths, head_labels, hand_labels, head_coords, hand_coords = self.samples[idx]
         head_images = [self.transform(Image.open(path).convert("RGB")) for path in head_paths]
-        hand_images = [self.transform(Image.open(path).convert("RGB")) for path in hand_paths]
+        hand_images = []
+        for path, coords in zip(hand_paths, hand_coords):
+            img = Image.open(path).convert("RGB")
+            if self.hand_roi_enabled:
+                img = self._crop_hand_roi(img, coords)
+            hand_images.append(self.transform(img))
         head_images_tensor = torch.stack(head_images, dim=0)
         hand_images_tensor = torch.stack(hand_images, dim=0)
         head_labels_tensor = torch.tensor(head_labels, dtype=torch.long)
@@ -251,3 +262,35 @@ class MultiPoseSequenceDataset(Dataset):
             head_coords_tensor,
             hand_coords_tensor,
         )
+
+    def _crop_hand_roi(self, image: Image.Image, coords: List[float]) -> Image.Image:
+        if len(coords) < 4:
+            return image
+        lx, ly, rx, ry = coords[:4]
+        points = []
+        if lx > 0 or ly > 0:
+            points.append((lx, ly))
+        if rx > 0 or ry > 0:
+            points.append((rx, ry))
+        if not points:
+            return image
+        width, height = image.size
+        xs = [p[0] * width for p in points]
+        ys = [p[1] * height for p in points]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        box_w = max_x - min_x
+        box_h = max_y - min_y
+        min_side = min(width, height)
+        min_size = self.hand_roi_min_scale * min_side
+        size = max(box_w, box_h, min_size) * self.hand_roi_expand
+        cx = (min_x + max_x) / 2.0
+        cy = (min_y + max_y) / 2.0
+        half = size / 2.0
+        left = max(0.0, cx - half)
+        top = max(0.0, cy - half)
+        right = min(width, cx + half)
+        bottom = min(height, cy + half)
+        if right <= left or bottom <= top:
+            return image
+        return image.crop((left, top, right, bottom))

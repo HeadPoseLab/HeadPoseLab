@@ -61,6 +61,7 @@ def compute_class_weights(counts, loss_cfg, device):
 def build_dataset(cfg, mode: str, logger):
     try:
         sampler_cfg = cfg.get("sampler", {})
+        hand_roi_cfg = cfg.get("hand_roi", {})
         dataset = MultiPoseSequenceDataset(
             data_root=cfg["data_root"],
             mode=mode,
@@ -74,6 +75,9 @@ def build_dataset(cfg, mode: str, logger):
             hand_dir=cfg.get("hand_dir", "hand_pose"),
             sample_weight_head=sampler_cfg.get("sample_weight_head", 0.5),
             sample_weight_hand=sampler_cfg.get("sample_weight_hand", 0.5),
+            hand_roi_enabled=hand_roi_cfg.get("enabled", False),
+            hand_roi_expand=hand_roi_cfg.get("expand", 1.6),
+            hand_roi_min_scale=hand_roi_cfg.get("min_scale", 0.2),
         )
         return dataset
     except Exception as exc:  # noqa: BLE001
@@ -114,6 +118,48 @@ def build_dataloaders(cfg, logger):
         else None
     )
     return train_loader, val_loader, train_ds, val_ds
+
+
+def _set_module_requires_grad(module, requires_grad: bool):
+    for param in module.parameters():
+        param.requires_grad = requires_grad
+
+
+def _apply_freeze_stages(module, freeze_stages: int):
+    if freeze_stages is None or freeze_stages < 0:
+        return
+    if hasattr(module, "_freeze_stages"):
+        module._freeze_stages(freeze_stages)
+        return
+    resnet_branch = getattr(module, "resnet_branch", None)
+    if resnet_branch is not None and hasattr(resnet_branch, "_freeze_stages"):
+        resnet_branch._freeze_stages(freeze_stages)
+
+
+def _set_backbone_trainable(model, trainable: bool, freeze_stages: int):
+    backbones = []
+    for backbone in (model.backbone_head, model.backbone_hand):
+        if backbone not in backbones:
+            backbones.append(backbone)
+    for backbone in backbones:
+        _set_module_requires_grad(backbone, trainable)
+        if trainable and freeze_stages is not None and freeze_stages >= 0:
+            _apply_freeze_stages(backbone, freeze_stages)
+
+
+def build_optimizer(model, cfg):
+    base_lr = cfg["train"]["lr"]
+    backbone_lr_scale = cfg["train"].get("backbone_lr_scale", 0.1)
+    backbone_modules = {model.backbone_head, model.backbone_hand}
+    backbone_params = [p for m in backbone_modules for p in m.parameters() if p.requires_grad]
+    backbone_param_ids = {id(p) for p in backbone_params}
+    other_params = [p for p in model.parameters() if p.requires_grad and id(p) not in backbone_param_ids]
+    param_groups = []
+    if backbone_params:
+        param_groups.append({"params": backbone_params, "lr": base_lr * backbone_lr_scale})
+    if other_params:
+        param_groups.append({"params": other_params, "lr": base_lr})
+    return optim.AdamW(param_groups, lr=base_lr, weight_decay=cfg["train"]["weight_decay"])
 
 
 def train_one_epoch(
@@ -235,6 +281,8 @@ def main():
         adapter_enabled=cfg["model"].get("adapter", {}).get("enabled", False),
         adapter_dim=cfg["model"].get("adapter", {}).get("dim", None),
         adapter_dropout=cfg["model"].get("adapter", {}).get("dropout", 0.1),
+        hand_use_attn_pool=cfg["model"].get("hand_attention_pool", False),
+        hand_attn_pool_dropout=cfg["model"].get("hand_attention_dropout", 0.1),
         num_head_classes=cfg["model"].get("num_head_classes", HEAD_NUM_CLASSES),
         num_hand_classes=cfg["model"].get("num_hand_classes", HAND_NUM_CLASSES),
         freeze_backbone=cfg["model"]["freeze_backbone"],
@@ -278,21 +326,22 @@ def main():
         criterion_hand = FocalLoss(gamma=hand_gamma, weight=class_weights_hand)
     else:
         criterion_hand = nn.CrossEntropyLoss(weight=class_weights_hand)
-    base_lr = cfg["train"]["lr"]
-    backbone_lr_scale = cfg["train"].get("backbone_lr_scale", 0.1)
-    backbone_modules = {model.backbone_head, model.backbone_hand}
-    backbone_params = [p for m in backbone_modules for p in m.parameters() if p.requires_grad]
-    backbone_param_ids = {id(p) for p in backbone_params}
-    other_params = [p for p in model.parameters() if p.requires_grad and id(p) not in backbone_param_ids]
-    param_groups = []
-    if backbone_params:
-        param_groups.append({"params": backbone_params, "lr": base_lr * backbone_lr_scale})
-    if other_params:
-        param_groups.append({"params": other_params, "lr": base_lr})
-    optimizer = optim.AdamW(param_groups, lr=base_lr, weight_decay=cfg["train"]["weight_decay"])
+    freeze_epochs = int(cfg["train"].get("freeze_backbone_epochs", 0))
+    freeze_backbone = cfg["model"].get("freeze_backbone", False)
+    if freeze_backbone and freeze_epochs > 0:
+        logger.warning("freeze_backbone is true; freeze_backbone_epochs will be ignored.")
+        freeze_epochs = 0
+
+    if freeze_epochs > 0:
+        _set_backbone_trainable(model, False, cfg["model"].get("freeze_stages", -1))
+    optimizer = build_optimizer(model, cfg)
 
     best_val_loss = float("inf")
     for epoch in range(1, cfg["train"]["epochs"] + 1):
+        if freeze_epochs > 0 and epoch == freeze_epochs + 1:
+            _set_backbone_trainable(model, True, cfg["model"].get("freeze_stages", -1))
+            optimizer = build_optimizer(model, cfg)
+            logger.info("Unfroze backbone at epoch %d and rebuilt optimizer.", epoch)
         train_loss = train_one_epoch(
             model,
             train_loader,

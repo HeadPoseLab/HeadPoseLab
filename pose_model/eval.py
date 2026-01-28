@@ -180,6 +180,7 @@ def main():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
     sampler_cfg = cfg.get("sampler", {})
+    hand_roi_cfg = cfg.get("hand_roi", {})
     dataset = MultiPoseSequenceDataset(
         data_root=cfg["data_root"],
         mode="test",
@@ -193,6 +194,9 @@ def main():
         hand_dir=cfg.get("hand_dir", "hand_pose"),
         sample_weight_head=sampler_cfg.get("sample_weight_head", 0.5),
         sample_weight_hand=sampler_cfg.get("sample_weight_hand", 0.5),
+        hand_roi_enabled=hand_roi_cfg.get("enabled", False),
+        hand_roi_expand=hand_roi_cfg.get("expand", 1.6),
+        hand_roi_min_scale=hand_roi_cfg.get("min_scale", 0.2),
     )
     loader = DataLoader(dataset, batch_size=cfg["batch_size"], shuffle=False, num_workers=cfg["num_workers"])
 
@@ -222,6 +226,8 @@ def main():
         adapter_enabled=cfg["model"].get("adapter", {}).get("enabled", False),
         adapter_dim=cfg["model"].get("adapter", {}).get("dim", None),
         adapter_dropout=cfg["model"].get("adapter", {}).get("dropout", 0.1),
+        hand_use_attn_pool=cfg["model"].get("hand_attention_pool", False),
+        hand_attn_pool_dropout=cfg["model"].get("hand_attention_dropout", 0.1),
         num_head_classes=cfg["model"].get("num_head_classes", HEAD_NUM_CLASSES),
         num_hand_classes=cfg["model"].get("num_hand_classes", HAND_NUM_CLASSES),
         freeze_backbone=cfg["model"]["freeze_backbone"],

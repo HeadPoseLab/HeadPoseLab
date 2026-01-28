@@ -121,6 +121,8 @@ def main():
         adapter_enabled=cfg["model"].get("adapter", {}).get("enabled", False),
         adapter_dim=cfg["model"].get("adapter", {}).get("dim", None),
         adapter_dropout=cfg["model"].get("adapter", {}).get("dropout", 0.1),
+        hand_use_attn_pool=cfg["model"].get("hand_attention_pool", False),
+        hand_attn_pool_dropout=cfg["model"].get("hand_attention_dropout", 0.1),
         num_head_classes=cfg["model"].get("num_head_classes", HEAD_NUM_CLASSES),
         num_hand_classes=cfg["model"].get("num_hand_classes", HAND_NUM_CLASSES),
         freeze_backbone=cfg["model"]["freeze_backbone"],

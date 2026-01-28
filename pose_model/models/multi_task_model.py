@@ -8,6 +8,19 @@ from .cnn_lstm import TemporalConvNet
 from .transformer_encoder import TransformerEncoder
 
 
+class TemporalAttentionPooling(nn.Module):
+    def __init__(self, feature_dim: int, dropout: float = 0.1):
+        super().__init__()
+        self.score = nn.Linear(feature_dim, 1)
+        self.dropout = nn.Dropout(dropout) if dropout and dropout > 0 else nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, T, D]
+        attn = torch.softmax(self.score(x).squeeze(-1), dim=1)
+        context = torch.bmm(attn.unsqueeze(1), x).squeeze(1)
+        return self.dropout(context)
+
+
 class TransformerTemporal(nn.Module):
     def __init__(self, feature_dim: int, cfg: dict):
         super().__init__()
@@ -101,6 +114,8 @@ class MultiTaskPoseModel(nn.Module):
         adapter_enabled: bool = False,
         adapter_dim: int | None = None,
         adapter_dropout: float = 0.1,
+        hand_use_attn_pool: bool = False,
+        hand_attn_pool_dropout: float = 0.1,
         num_head_classes: int = 5,
         num_hand_classes: int = 4,
         freeze_backbone: bool = False,
@@ -188,6 +203,13 @@ class MultiTaskPoseModel(nn.Module):
                 hand_transformer_cfg,
             )
 
+        self.hand_use_attn_pool = bool(hand_use_attn_pool)
+        self.hand_attn_pool = (
+            TemporalAttentionPooling(self.temporal_hand.output_dim, hand_attn_pool_dropout)
+            if self.hand_use_attn_pool
+            else None
+        )
+
         self.head_classifier = nn.Linear(self.temporal_head.output_dim, num_head_classes)
         self.hand_classifier = nn.Linear(self.temporal_hand.output_dim, num_hand_classes)
 
@@ -222,6 +244,9 @@ class MultiTaskPoseModel(nn.Module):
 
         head_encoded = self.temporal_head(head_features)
         hand_encoded = self.temporal_hand(hand_features)
+        if self.hand_attn_pool is not None:
+            hand_context = self.hand_attn_pool(hand_encoded)
+            hand_encoded = hand_encoded + hand_context.unsqueeze(1)
 
         head_logits = self.head_classifier(head_encoded)
         hand_logits = self.hand_classifier(hand_encoded)
