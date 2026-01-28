@@ -40,9 +40,9 @@ model:
   tcn_kernel: 3
   tcn_dilations: [1, 2]
   tcn_dropout: 0.2
-  hand_tcn_channels: [256, 256, 256]
+  hand_tcn_channels: [256, 256, 256, 256]
   hand_tcn_kernel: 3
-  hand_tcn_dilations: [1, 2, 4]
+  hand_tcn_dilations: [1, 2, 4, 8]
   hand_tcn_dropout: 0.2
   transformer:
     input_dim: null            # optional override; defaults to feature_dim
@@ -78,10 +78,10 @@ train:
   weight_decay: 0.0001
   grad_clip: 5.0
   device: auto
-  save_dir: ./checkpoints/exp_step2_hand_tcn_slim
+  save_dir: ./checkpoints/exp_hand_bias_v2
   log_interval: 10
   log_dir: ./runs
 
 # Evaluation
 eval:
-  checkpoint: ./checkpoints/exp_step2_hand_tcn_slim/best.pt
+  checkpoint: ./checkpoints/exp_hand_bias_v2/best.pt
