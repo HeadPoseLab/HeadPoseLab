@@ -85,3 +85,10 @@ train:
 # Evaluation
 eval:
   checkpoint: ./checkpoints/exp_hand_bias_v2/best.pt
+  hand_unknown_threshold: 0.0
+  hand_unknown_class: 4
+
+# Inference
+inference:
+  hand_unknown_threshold: 0.0
+  hand_unknown_class: 4
