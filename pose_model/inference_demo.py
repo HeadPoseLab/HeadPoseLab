@@ -24,18 +24,6 @@ def parse_args():
     parser.add_argument("--config", type=str, default="configs/default.yaml", help="Path to config yaml")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to trained checkpoint")
     parser.add_argument("--person_dir", type=str, required=True, help="Directory containing head_pose/hand_pose")
-    parser.add_argument(
-        "--hand_unknown_threshold",
-        type=float,
-        default=None,
-        help="If set, map low-confidence hand predictions to unknown class",
-    )
-    parser.add_argument(
-        "--hand_unknown_class",
-        type=int,
-        default=None,
-        help="1-based hand class id to use as unknown (default: last class)",
-    )
     return parser.parse_args()
 
 
@@ -86,14 +74,6 @@ def main():
     args = parse_args()
     cfg = load_config(args.config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    inference_cfg = cfg.get("inference", {})
-    hand_unknown_threshold = args.hand_unknown_threshold
-    if hand_unknown_threshold is None:
-        hand_unknown_threshold = float(inference_cfg.get("hand_unknown_threshold", 0.0))
-    hand_unknown_class = args.hand_unknown_class
-    if hand_unknown_class is None:
-        hand_unknown_class = int(inference_cfg.get("hand_unknown_class", HAND_NUM_CLASSES))
-    hand_unknown_index = max(0, min(hand_unknown_class - 1, HAND_NUM_CLASSES - 1))
 
     model = MultiTaskPoseModel(
         backbone=cfg["model"]["backbone"],
@@ -148,12 +128,7 @@ def main():
     with torch.no_grad():
         head_logits, hand_logits = model(head_tensor, hand_tensor)
         head_preds = head_logits.argmax(dim=-1).squeeze(0).cpu().tolist()
-        hand_probs = torch.softmax(hand_logits, dim=-1)
-        hand_max_probs, hand_preds_tensor = hand_probs.max(dim=-1)
-        if hand_unknown_threshold and hand_unknown_threshold > 0:
-            hand_preds_tensor = hand_preds_tensor.clone()
-            hand_preds_tensor[hand_max_probs < hand_unknown_threshold] = hand_unknown_index
-        hand_preds = hand_preds_tensor.squeeze(0).cpu().tolist()
+        hand_preds = hand_logits.argmax(dim=-1).squeeze(0).cpu().tolist()
 
     print("Frame-level predictions:")
     for head_path, hand_path, head_pred, hand_pred in zip(head_paths, hand_paths, head_preds, hand_preds):
