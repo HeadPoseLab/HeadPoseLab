@@ -113,12 +113,14 @@ def evaluate(
     head_labels_all, hand_labels_all = [], []
     hand_preds_all = []
     with torch.no_grad():
-        for head_images, hand_images, head_labels, hand_labels, _, _ in loader:
+        for head_images, hand_images, head_labels, hand_labels, head_coords, hand_coords in loader:
             head_images = head_images.to(device)
             hand_images = hand_images.to(device)
             head_labels = head_labels.to(device)
             hand_labels = hand_labels.to(device)
-            head_logits, hand_logits = model(head_images, hand_images)
+            head_coords = head_coords.to(device)
+            hand_coords = hand_coords.to(device)
+            head_logits, hand_logits = model(head_images, hand_images, head_coords, hand_coords)
             head_loss = criterion_head(head_logits.view(-1, HEAD_NUM_CLASSES), head_labels.view(-1))
             hand_loss = criterion_hand(hand_logits.view(-1, HAND_NUM_CLASSES), hand_labels.view(-1))
             loss = head_weight * head_loss + hand_weight * hand_loss
@@ -181,6 +183,7 @@ def main():
 
     sampler_cfg = cfg.get("sampler", {})
     hand_roi_cfg = cfg.get("hand_roi", {})
+    augment_cfg = cfg.get("augment", {})
     dataset = MultiPoseSequenceDataset(
         data_root=cfg["data_root"],
         mode="test",
@@ -197,6 +200,7 @@ def main():
         hand_roi_enabled=hand_roi_cfg.get("enabled", False),
         hand_roi_expand=hand_roi_cfg.get("expand", 1.6),
         hand_roi_min_scale=hand_roi_cfg.get("min_scale", 0.2),
+        augment_cfg=augment_cfg,
     )
     loader = DataLoader(dataset, batch_size=cfg["batch_size"], shuffle=False, num_workers=cfg["num_workers"])
 
@@ -226,6 +230,11 @@ def main():
         adapter_enabled=cfg["model"].get("adapter", {}).get("enabled", False),
         adapter_dim=cfg["model"].get("adapter", {}).get("dim", None),
         adapter_dropout=cfg["model"].get("adapter", {}).get("dropout", 0.1),
+        keypoint_fusion_enabled=cfg["model"].get("keypoint_fusion", {}).get("enabled", False),
+        keypoint_hidden_dim=cfg["model"].get("keypoint_fusion", {}).get("hidden_dim", None),
+        keypoint_dropout=cfg["model"].get("keypoint_fusion", {}).get("dropout", 0.1),
+        head_use_attn_pool=cfg["model"].get("head_attention_pool", False),
+        head_attn_pool_dropout=cfg["model"].get("head_attention_dropout", 0.1),
         hand_use_attn_pool=cfg["model"].get("hand_attention_pool", False),
         hand_attn_pool_dropout=cfg["model"].get("hand_attention_dropout", 0.1),
         num_head_classes=cfg["model"].get("num_head_classes", HEAD_NUM_CLASSES),

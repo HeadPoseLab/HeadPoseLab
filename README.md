@@ -47,15 +47,25 @@ python train.py --config configs/default.yaml
 ```
 模型与日志目录由 `configs/default.yaml` 中的 `train.save_dir` 控制。
 
+高准确率实验配置（头姿态优先）：
+```bash
+python train.py --config configs/exp_head_priority.yaml
+```
+训练会保存：
+- `best_head_f1.pt`（主模型）
+- `best_val_loss.pt`
+- `last.pt`
+
 ## 评估
 ```bash
 cd pose_model
 .\.venv\Scripts\Activate
-python eval.py --config configs/default.yaml --checkpoint checkpoints/best.pt
+python eval.py --config configs/default.yaml --checkpoint checkpoints/exp_roi_tcn_attn/best.pt
+python eval.py --config configs/exp_head_priority.yaml --checkpoint checkpoints/exp_head_priority/best_head_f1.pt
 ```
 
 ## 推理示例
 ```bash
-python inference_demo.py --config configs/default.yaml --checkpoint checkpoints/best.pt --images_dir path/to/images
+python inference_demo.py --config configs/default.yaml --checkpoint checkpoints/exp_roi_tcn_attn/best.pt --person_dir path/to/person_dir
 ```
-`images_dir` 需包含按时间排序的一段序列（数量不少于配置的 `sequence_length`）。
+`person_dir` 需包含 `head_pose/images`、`hand_pose/images`，建议同时包含对应 `labels.json` 以启用关键点融合推理。

@@ -1,4 +1,5 @@
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -62,6 +63,44 @@ def _collect_images(images_dir: Path):
     return index_map
 
 
+def _load_labels(path: Path):
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, list):
+        raise ValueError(f"labels.json must be a list: {path}")
+    return data
+
+
+def _index_entries(entries):
+    indexed = {}
+    for entry in entries:
+        image_name = entry.get("image")
+        if not image_name:
+            continue
+        idx = _extract_index(image_name)
+        if idx is None:
+            continue
+        indexed[idx] = entry
+    return indexed
+
+
+def _head_coords_from_entry(entry: dict):
+    kp = entry.get("keypoints", {}).get("head", {})
+    return [float(kp.get("x", 0.0)), float(kp.get("y", 0.0))]
+
+
+def _hand_coords_from_entry(entry: dict):
+    keypoints = entry.get("keypoints", {})
+    left = keypoints.get("left_hand", {})
+    right = keypoints.get("right_hand", {})
+    return [
+        float(left.get("x", 0.0)),
+        float(left.get("y", 0.0)),
+        float(right.get("x", 0.0)),
+        float(right.get("y", 0.0)),
+    ]
+
+
 def prepare_aligned_sequences(head_dir: Path, hand_dir: Path, seq_len: int, image_size: int):
     transform = transforms.Compose(
         [
@@ -69,17 +108,42 @@ def prepare_aligned_sequences(head_dir: Path, hand_dir: Path, seq_len: int, imag
             transforms.ToTensor(),
         ]
     )
-    head_map = _collect_images(head_dir)
-    hand_map = _collect_images(hand_dir)
-    common_indices = sorted(set(head_map.keys()) & set(hand_map.keys()))
-    if len(common_indices) < seq_len:
-        raise ValueError(f"Not enough aligned frames. Need at least {seq_len}.")
-    selected = common_indices[:seq_len]
-    head_paths = [head_map[i] for i in selected]
-    hand_paths = [hand_map[i] for i in selected]
+
+    head_labels_path = head_dir.parent / "labels.json"
+    hand_labels_path = hand_dir.parent / "labels.json"
+    if head_labels_path.exists() and hand_labels_path.exists():
+        head_map = _index_entries(_load_labels(head_labels_path))
+        hand_map = _index_entries(_load_labels(hand_labels_path))
+        common_indices = sorted(set(head_map.keys()) & set(hand_map.keys()))
+        if len(common_indices) < seq_len:
+            raise ValueError(f"Not enough aligned frames. Need at least {seq_len}.")
+        selected = common_indices[:seq_len]
+        head_paths = [head_dir / head_map[i]["image"] for i in selected]
+        hand_paths = [hand_dir / hand_map[i]["image"] for i in selected]
+        head_coords = [_head_coords_from_entry(head_map[i]) for i in selected]
+        hand_coords = [_hand_coords_from_entry(hand_map[i]) for i in selected]
+    else:
+        head_map = _collect_images(head_dir)
+        hand_map = _collect_images(hand_dir)
+        common_indices = sorted(set(head_map.keys()) & set(hand_map.keys()))
+        if len(common_indices) < seq_len:
+            raise ValueError(f"Not enough aligned frames. Need at least {seq_len}.")
+        selected = common_indices[:seq_len]
+        head_paths = [head_map[i] for i in selected]
+        hand_paths = [hand_map[i] for i in selected]
+        head_coords = [[0.0, 0.0] for _ in selected]
+        hand_coords = [[0.0, 0.0, 0.0, 0.0] for _ in selected]
+
     head_images = [transform(Image.open(p).convert("RGB")) for p in head_paths]
     hand_images = [transform(Image.open(p).convert("RGB")) for p in hand_paths]
-    return torch.stack(head_images, dim=0), torch.stack(hand_images, dim=0), head_paths, hand_paths
+    return (
+        torch.stack(head_images, dim=0),
+        torch.stack(hand_images, dim=0),
+        torch.tensor(head_coords, dtype=torch.float32),
+        torch.tensor(hand_coords, dtype=torch.float32),
+        head_paths,
+        hand_paths,
+    )
 
 
 def main():
@@ -121,6 +185,11 @@ def main():
         adapter_enabled=cfg["model"].get("adapter", {}).get("enabled", False),
         adapter_dim=cfg["model"].get("adapter", {}).get("dim", None),
         adapter_dropout=cfg["model"].get("adapter", {}).get("dropout", 0.1),
+        keypoint_fusion_enabled=cfg["model"].get("keypoint_fusion", {}).get("enabled", False),
+        keypoint_hidden_dim=cfg["model"].get("keypoint_fusion", {}).get("hidden_dim", None),
+        keypoint_dropout=cfg["model"].get("keypoint_fusion", {}).get("dropout", 0.1),
+        head_use_attn_pool=cfg["model"].get("head_attention_pool", False),
+        head_attn_pool_dropout=cfg["model"].get("head_attention_dropout", 0.1),
         hand_use_attn_pool=cfg["model"].get("hand_attention_pool", False),
         hand_attn_pool_dropout=cfg["model"].get("hand_attention_dropout", 0.1),
         num_head_classes=cfg["model"].get("num_head_classes", HEAD_NUM_CLASSES),
@@ -141,14 +210,16 @@ def main():
     person_dir = Path(args.person_dir)
     head_images_dir = person_dir / cfg.get("head_dir", "head_pose") / "images"
     hand_images_dir = person_dir / cfg.get("hand_dir", "hand_pose") / "images"
-    head_tensor, hand_tensor, head_paths, hand_paths = prepare_aligned_sequences(
+    head_tensor, hand_tensor, head_coords, hand_coords, head_paths, hand_paths = prepare_aligned_sequences(
         head_images_dir, hand_images_dir, cfg["sequence_length"], cfg["image_size"]
     )
     head_tensor = head_tensor.unsqueeze(0).to(device)
     hand_tensor = hand_tensor.unsqueeze(0).to(device)
+    head_coords = head_coords.unsqueeze(0).to(device)
+    hand_coords = hand_coords.unsqueeze(0).to(device)
 
     with torch.no_grad():
-        head_logits, hand_logits = model(head_tensor, hand_tensor)
+        head_logits, hand_logits = model(head_tensor, hand_tensor, head_coords, hand_coords)
         head_preds = head_logits.argmax(dim=-1).squeeze(0).cpu().tolist()
         hand_probs = torch.softmax(hand_logits, dim=-1)
         hand_max_probs, hand_preds_tensor = hand_probs.max(dim=-1)

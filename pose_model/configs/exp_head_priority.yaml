@@ -1,0 +1,145 @@
+# Data
+data_root: /Users/sanjin/CursorProject/HeadPoseLab/pose_model/data
+head_dir: head_pose
+hand_dir: hand_pose
+sequence_length: 24
+overlap: true
+train_ratio: 0.7
+val_ratio: 0.2
+seed: 42
+image_size: 160
+hand_roi:
+  enabled: true
+  expand: 1.6
+  min_scale: 0.2
+
+# Data augmentation (train mode only, sequence-consistent)
+augment:
+  enabled: true
+  hflip_p: 0.5
+  color_jitter:
+    brightness: 0.2
+    contrast: 0.2
+    saturation: 0.2
+    hue: 0.05
+  affine:
+    p: 0.35
+    degrees: 8.0
+    translate: 0.03
+    scale_min: 0.95
+    scale_max: 1.05
+    shear: 3.0
+  blur:
+    p: 0.2
+    kernel_size: 3
+    sigma_min: 0.1
+    sigma_max: 1.2
+  erasing:
+    p: 0.15
+    scale_min: 0.02
+    scale_max: 0.12
+    ratio_min: 0.3
+    ratio_max: 3.3
+    value: 0.0
+
+# Dataloader
+batch_size: 8
+num_workers: 4
+sampler:
+  balanced: true
+  sample_weight_head: 0.75
+  sample_weight_hand: 0.25
+
+# Model
+model:
+  backbone: hybrid_cnn_resnet
+  resnet_variant: resnet50
+  cnn_branch_channels: [32, 64, 128]
+  feature_dim: 320
+  fusion: concat
+  fusion_dropout: 0.1
+  shared_backbone: false
+  shared_temporal: false
+  adapter:
+    enabled: true
+    dim: 320
+    dropout: 0.1
+  keypoint_fusion:
+    enabled: true
+    hidden_dim: 160
+    dropout: 0.1
+  num_head_classes: 5
+  num_hand_classes: 4
+  temporal_encoder: transformer
+  head_temporal_encoder: transformer
+  hand_temporal_encoder: tcn
+  tcn_channels: [192, 192]
+  tcn_kernel: 3
+  tcn_dilations: [1, 2]
+  tcn_dropout: 0.2
+  hand_tcn_channels: [128, 128]
+  hand_tcn_kernel: 3
+  hand_tcn_dilations: [1, 2]
+  hand_tcn_dropout: 0.2
+  head_attention_pool: true
+  head_attention_dropout: 0.1
+  hand_attention_pool: true
+  hand_attention_dropout: 0.1
+  transformer:
+    input_dim: null
+    num_layers: 3
+    nhead: 8
+    dim_feedforward: 1024
+    dropout: 0.1
+    activation: relu
+    use_positional_encoding: true
+    pos_encoding: learned
+    pre_norm: true
+    max_len: 256
+  freeze_backbone: false
+  freeze_stages: -1
+  pretrained: true
+
+# Loss
+loss:
+  type: cross_entropy
+  head_type: focal
+  hand_type: cross_entropy
+  class_weights: auto
+  focal_gamma: 2.0
+  head_focal_gamma: 1.5
+  hand_focal_gamma: 2.0
+  head_weight: 1.6
+  hand_weight: 0.6
+
+# Optimization
+train:
+  epochs: 120
+  lr: 0.0003
+  backbone_lr_scale: 0.2
+  weight_decay: 0.0005
+  grad_clip: 1.0
+  device: auto
+  save_dir: ./checkpoints/exp_head_priority
+  log_interval: 10
+  log_dir: ./runs/exp_head_priority
+  freeze_backbone_epochs: 2
+  selection_metric: head_f1
+  selection_mode: max
+  early_stop_patience: 20
+  scheduler:
+    enabled: true
+    type: warmup_cosine
+    warmup_epochs: 5
+    min_lr_ratio: 0.05
+
+# Evaluation
+eval:
+  checkpoint: ./checkpoints/exp_head_priority/best_head_f1.pt
+  hand_unknown_threshold: 0.0
+  hand_unknown_class: 4
+
+# Inference
+inference:
+  hand_unknown_threshold: 0.0
+  hand_unknown_class: 4

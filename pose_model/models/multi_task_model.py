@@ -86,6 +86,39 @@ class BranchAdapter(nn.Module):
         return x + self.net(x)
 
 
+class KeypointEncoder(nn.Module):
+    def __init__(self, input_dim: int, feature_dim: int, hidden_dim: int | None = None, dropout: float = 0.1):
+        super().__init__()
+        hidden = hidden_dim or feature_dim
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, feature_dim),
+            nn.LayerNorm(feature_dim),
+        )
+
+    def forward(self, coords: torch.Tensor) -> torch.Tensor:
+        # coords: [B, T, C]
+        return self.net(coords)
+
+
+class CoordFeatureFusion(nn.Module):
+    def __init__(self, feature_dim: int):
+        super().__init__()
+        self.gate = nn.Sequential(
+            nn.Linear(feature_dim * 2, feature_dim),
+            nn.Sigmoid(),
+        )
+        self.norm = nn.LayerNorm(feature_dim)
+
+    def forward(self, features: torch.Tensor, coord_features: torch.Tensor) -> torch.Tensor:
+        # features/coord_features: [B, T, D]
+        fused = torch.cat([features, coord_features], dim=-1)
+        gate = self.gate(fused)
+        return self.norm(features + gate * coord_features)
+
+
 class MultiTaskPoseModel(nn.Module):
     def __init__(
         self,
@@ -114,6 +147,11 @@ class MultiTaskPoseModel(nn.Module):
         adapter_enabled: bool = False,
         adapter_dim: int | None = None,
         adapter_dropout: float = 0.1,
+        keypoint_fusion_enabled: bool = False,
+        keypoint_hidden_dim: int | None = None,
+        keypoint_dropout: float = 0.1,
+        head_use_attn_pool: bool = False,
+        head_attn_pool_dropout: float = 0.1,
         hand_use_attn_pool: bool = False,
         hand_attn_pool_dropout: float = 0.1,
         num_head_classes: int = 5,
@@ -154,6 +192,19 @@ class MultiTaskPoseModel(nn.Module):
 
         self.head_adapter = BranchAdapter(feature_dim, adapter_dim, adapter_dropout) if adapter_enabled else nn.Identity()
         self.hand_adapter = BranchAdapter(feature_dim, adapter_dim, adapter_dropout) if adapter_enabled else nn.Identity()
+        self.keypoint_fusion_enabled = bool(keypoint_fusion_enabled)
+        self.head_keypoint_encoder = (
+            KeypointEncoder(2, feature_dim, keypoint_hidden_dim, keypoint_dropout)
+            if self.keypoint_fusion_enabled
+            else None
+        )
+        self.hand_keypoint_encoder = (
+            KeypointEncoder(4, feature_dim, keypoint_hidden_dim, keypoint_dropout)
+            if self.keypoint_fusion_enabled
+            else None
+        )
+        self.head_coord_fusion = CoordFeatureFusion(feature_dim) if self.keypoint_fusion_enabled else None
+        self.hand_coord_fusion = CoordFeatureFusion(feature_dim) if self.keypoint_fusion_enabled else None
 
         head_encoder = (head_temporal_encoder or temporal_encoder).lower()
         hand_encoder = (hand_temporal_encoder or temporal_encoder).lower()
@@ -203,6 +254,12 @@ class MultiTaskPoseModel(nn.Module):
                 hand_transformer_cfg,
             )
 
+        self.head_use_attn_pool = bool(head_use_attn_pool)
+        self.head_attn_pool = (
+            TemporalAttentionPooling(self.temporal_head.output_dim, head_attn_pool_dropout)
+            if self.head_use_attn_pool
+            else None
+        )
         self.hand_use_attn_pool = bool(hand_use_attn_pool)
         self.hand_attn_pool = (
             TemporalAttentionPooling(self.temporal_hand.output_dim, hand_attn_pool_dropout)
@@ -235,14 +292,30 @@ class MultiTaskPoseModel(nn.Module):
         feats = backbone(x.view(b * t, c, h, w))
         return feats.view(b, t, -1)
 
-    def forward(self, head_images: torch.Tensor, hand_images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        head_images: torch.Tensor,
+        hand_images: torch.Tensor,
+        head_coords: torch.Tensor | None = None,
+        hand_coords: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         head_features = self._extract_features(self.backbone_head, head_images)
         hand_features = self._extract_features(self.backbone_hand, hand_images)
 
         head_features = self.head_adapter(head_features)
         hand_features = self.hand_adapter(hand_features)
+        if self.keypoint_fusion_enabled:
+            if head_coords is not None and self.head_keypoint_encoder is not None and self.head_coord_fusion is not None:
+                head_coord_features = self.head_keypoint_encoder(head_coords)
+                head_features = self.head_coord_fusion(head_features, head_coord_features)
+            if hand_coords is not None and self.hand_keypoint_encoder is not None and self.hand_coord_fusion is not None:
+                hand_coord_features = self.hand_keypoint_encoder(hand_coords)
+                hand_features = self.hand_coord_fusion(hand_features, hand_coord_features)
 
         head_encoded = self.temporal_head(head_features)
+        if self.head_attn_pool is not None:
+            head_context = self.head_attn_pool(head_encoded)
+            head_encoded = head_encoded + head_context.unsqueeze(1)
         hand_encoded = self.temporal_hand(hand_features)
         if self.hand_attn_pool is not None:
             hand_context = self.hand_attn_pool(hand_encoded)

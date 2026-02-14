@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import sys
 from pathlib import Path
@@ -6,6 +7,7 @@ from pathlib import Path
 import torch
 import yaml
 from torch import nn, optim
+from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.utils.tensorboard import SummaryWriter
 
@@ -62,6 +64,7 @@ def build_dataset(cfg, mode: str, logger):
     try:
         sampler_cfg = cfg.get("sampler", {})
         hand_roi_cfg = cfg.get("hand_roi", {})
+        augment_cfg = cfg.get("augment", {})
         dataset = MultiPoseSequenceDataset(
             data_root=cfg["data_root"],
             mode=mode,
@@ -78,6 +81,7 @@ def build_dataset(cfg, mode: str, logger):
             hand_roi_enabled=hand_roi_cfg.get("enabled", False),
             hand_roi_expand=hand_roi_cfg.get("expand", 1.6),
             hand_roi_min_scale=hand_roi_cfg.get("min_scale", 0.2),
+            augment_cfg=augment_cfg,
         )
         return dataset
     except Exception as exc:  # noqa: BLE001
@@ -162,6 +166,30 @@ def build_optimizer(model, cfg):
     return optim.AdamW(param_groups, lr=base_lr, weight_decay=cfg["train"]["weight_decay"])
 
 
+def build_scheduler(optimizer, cfg):
+    scheduler_cfg = cfg["train"].get("scheduler", {})
+    if not scheduler_cfg or not scheduler_cfg.get("enabled", False):
+        return None
+    scheduler_type = str(scheduler_cfg.get("type", "warmup_cosine")).lower()
+    if scheduler_type != "warmup_cosine":
+        raise ValueError(f"Unsupported scheduler type: {scheduler_type}")
+    total_epochs = int(cfg["train"]["epochs"])
+    warmup_epochs = int(scheduler_cfg.get("warmup_epochs", 0))
+    min_lr_ratio = float(scheduler_cfg.get("min_lr_ratio", 0.05))
+    warmup_epochs = max(0, min(warmup_epochs, max(total_epochs - 1, 0)))
+
+    def _lr_lambda(epoch_idx: int):
+        if total_epochs <= 1:
+            return 1.0
+        if warmup_epochs > 0 and epoch_idx < warmup_epochs:
+            return max(1e-6, float(epoch_idx + 1) / float(warmup_epochs))
+        progress = (epoch_idx - warmup_epochs) / max(1, total_epochs - warmup_epochs - 1)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
+
+    return LambdaLR(optimizer, lr_lambda=_lr_lambda)
+
+
 def train_one_epoch(
     model,
     loader,
@@ -177,13 +205,17 @@ def train_one_epoch(
 ):
     model.train()
     total_loss = 0.0
-    for step, (head_images, hand_images, head_labels, hand_labels, _, _) in enumerate(loader, start=1):
+    for step, (head_images, hand_images, head_labels, hand_labels, head_coords, hand_coords) in enumerate(
+        loader, start=1
+    ):
         head_images = head_images.to(device)
         hand_images = hand_images.to(device)
         head_labels = head_labels.to(device)
         hand_labels = hand_labels.to(device)
+        head_coords = head_coords.to(device)
+        hand_coords = hand_coords.to(device)
 
-        head_logits, hand_logits = model(head_images, hand_images)
+        head_logits, hand_logits = model(head_images, hand_images, head_coords, hand_coords)
         head_loss = criterion_head(head_logits.view(-1, HEAD_NUM_CLASSES), head_labels.view(-1))
         hand_loss = criterion_hand(hand_logits.view(-1, HAND_NUM_CLASSES), hand_labels.view(-1))
         loss = head_weight * head_loss + hand_weight * hand_loss
@@ -215,12 +247,14 @@ def evaluate(model, loader, criterion_head, criterion_hand, device, head_weight:
     head_accs, hand_accs = [], []
     head_f1s, hand_f1s = [], []
     with torch.no_grad():
-        for head_images, hand_images, head_labels, hand_labels, _, _ in loader:
+        for head_images, hand_images, head_labels, hand_labels, head_coords, hand_coords in loader:
             head_images = head_images.to(device)
             hand_images = hand_images.to(device)
             head_labels = head_labels.to(device)
             hand_labels = hand_labels.to(device)
-            head_logits, hand_logits = model(head_images, hand_images)
+            head_coords = head_coords.to(device)
+            hand_coords = hand_coords.to(device)
+            head_logits, hand_logits = model(head_images, hand_images, head_coords, hand_coords)
             head_loss = criterion_head(head_logits.view(-1, HEAD_NUM_CLASSES), head_labels.view(-1))
             hand_loss = criterion_hand(hand_logits.view(-1, HAND_NUM_CLASSES), hand_labels.view(-1))
             loss = head_weight * head_loss + hand_weight * hand_loss
@@ -249,6 +283,11 @@ def main():
 
     logger.info("Using device: %s", device)
     train_loader, val_loader, train_ds, _ = build_dataloaders(cfg, logger)
+    if val_loader is None:
+        raise RuntimeError(
+            "Validation split is empty (val_loader is None). "
+            "Please increase val_ratio or dataset size before training."
+        )
 
     head_counts = [train_ds.class_counts_head.get(i, 0) for i in range(HEAD_NUM_CLASSES)]
     hand_counts = [train_ds.class_counts_hand.get(i, 0) for i in range(HAND_NUM_CLASSES)]
@@ -281,6 +320,11 @@ def main():
         adapter_enabled=cfg["model"].get("adapter", {}).get("enabled", False),
         adapter_dim=cfg["model"].get("adapter", {}).get("dim", None),
         adapter_dropout=cfg["model"].get("adapter", {}).get("dropout", 0.1),
+        keypoint_fusion_enabled=cfg["model"].get("keypoint_fusion", {}).get("enabled", False),
+        keypoint_hidden_dim=cfg["model"].get("keypoint_fusion", {}).get("hidden_dim", None),
+        keypoint_dropout=cfg["model"].get("keypoint_fusion", {}).get("dropout", 0.1),
+        head_use_attn_pool=cfg["model"].get("head_attention_pool", False),
+        head_attn_pool_dropout=cfg["model"].get("head_attention_dropout", 0.1),
         hand_use_attn_pool=cfg["model"].get("hand_attention_pool", False),
         hand_attn_pool_dropout=cfg["model"].get("hand_attention_dropout", 0.1),
         num_head_classes=cfg["model"].get("num_head_classes", HEAD_NUM_CLASSES),
@@ -335,12 +379,26 @@ def main():
     if freeze_epochs > 0:
         _set_backbone_trainable(model, False, cfg["model"].get("freeze_stages", -1))
     optimizer = build_optimizer(model, cfg)
+    scheduler = build_scheduler(optimizer, cfg)
+    if scheduler is not None:
+        scheduler.step()
 
+    selection_metric = str(cfg["train"].get("selection_metric", "val_loss")).lower()
+    selection_mode = str(cfg["train"].get("selection_mode", "min")).lower()
+    if selection_mode not in {"min", "max"}:
+        raise ValueError("train.selection_mode must be 'min' or 'max'")
+    best_primary = float("-inf") if selection_mode == "max" else float("inf")
     best_val_loss = float("inf")
+    early_stop_patience = int(cfg["train"].get("early_stop_patience", 0))
+    epochs_without_improvement = 0
+
     for epoch in range(1, cfg["train"]["epochs"] + 1):
         if freeze_epochs > 0 and epoch == freeze_epochs + 1:
             _set_backbone_trainable(model, True, cfg["model"].get("freeze_stages", -1))
             optimizer = build_optimizer(model, cfg)
+            scheduler = build_scheduler(optimizer, cfg)
+            if scheduler is not None:
+                scheduler.step()
             logger.info("Unfroze backbone at epoch %d and rebuilt optimizer.", epoch)
         train_loss = train_one_epoch(
             model,
@@ -355,34 +413,116 @@ def main():
             head_weight=head_weight,
             hand_weight=hand_weight,
         )
+        val_loss, head_acc, hand_acc, head_f1, hand_f1 = evaluate(
+            model,
+            val_loader,
+            criterion_head,
+            criterion_hand,
+            device,
+            head_weight,
+            hand_weight,
+        )
+        metric_values = {
+            "val_loss": val_loss,
+            "head_acc": head_acc,
+            "hand_acc": hand_acc,
+            "head_f1": head_f1,
+            "hand_f1": hand_f1,
+        }
+        if selection_metric not in metric_values:
+            raise ValueError(
+                f"Unsupported selection metric: {selection_metric}. "
+                f"Available: {sorted(metric_values.keys())}"
+            )
+        primary_value = metric_values[selection_metric]
+        improved_primary = (
+            primary_value > best_primary
+            if selection_mode == "max"
+            else primary_value < best_primary
+        )
 
-        if val_loader:
-            val_loss, head_acc, hand_acc, head_f1, hand_f1 = evaluate(
-                model,
-                val_loader,
-                criterion_head,
-                criterion_hand,
-                device,
-                head_weight,
-                hand_weight,
+        if improved_primary:
+            best_primary = primary_value
+            epochs_without_improvement = 0
+            ckpt_name = f"best_{selection_metric}.pt"
+            primary_ckpt_path = os.path.join(cfg["train"]["save_dir"], ckpt_name)
+            torch.save(
+                {
+                    "model_state": model.state_dict(),
+                    "cfg": cfg,
+                    "epoch": epoch,
+                    "metrics": metric_values,
+                },
+                primary_ckpt_path,
+            )
+            # Keep backward compatibility with previous default naming.
+            torch.save(
+                {
+                    "model_state": model.state_dict(),
+                    "cfg": cfg,
+                    "epoch": epoch,
+                    "metrics": metric_values,
+                },
+                os.path.join(cfg["train"]["save_dir"], "best.pt"),
             )
             logger.info(
-                "Epoch %d | train_loss=%.4f val_loss=%.4f head_acc=%.4f hand_acc=%.4f head_f1=%.4f hand_f1=%.4f",
-                epoch,
-                train_loss,
-                val_loss,
-                head_acc,
-                hand_acc,
-                head_f1,
-                hand_f1,
+                "Saved primary best checkpoint to %s (%s=%.4f)",
+                primary_ckpt_path,
+                selection_metric,
+                primary_value,
             )
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                ckpt_path = os.path.join(cfg["train"]["save_dir"], "best.pt")
-                torch.save({"model_state": model.state_dict(), "cfg": cfg}, ckpt_path)
-                logger.info("Saved best checkpoint to %s", ckpt_path)
         else:
-            logger.info("Epoch %d | train_loss=%.4f", epoch, train_loss)
+            epochs_without_improvement += 1
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            if selection_metric != "val_loss":
+                best_val_ckpt = os.path.join(cfg["train"]["save_dir"], "best_val_loss.pt")
+                torch.save(
+                    {
+                        "model_state": model.state_dict(),
+                        "cfg": cfg,
+                        "epoch": epoch,
+                        "metrics": metric_values,
+                    },
+                    best_val_ckpt,
+                )
+                logger.info("Saved best val-loss checkpoint to %s", best_val_ckpt)
+
+        last_ckpt = os.path.join(cfg["train"]["save_dir"], "last.pt")
+        torch.save(
+            {
+                "model_state": model.state_dict(),
+                "cfg": cfg,
+                "epoch": epoch,
+                "metrics": metric_values,
+            },
+            last_ckpt,
+        )
+
+        if scheduler is not None:
+            scheduler.step()
+        lr_log = ", ".join(f"{g['lr']:.6g}" for g in optimizer.param_groups)
+        logger.info(
+            "Epoch %d | train_loss=%.4f val_loss=%.4f head_acc=%.4f hand_acc=%.4f head_f1=%.4f hand_f1=%.4f | lrs=[%s]",
+            epoch,
+            train_loss,
+            val_loss,
+            head_acc,
+            hand_acc,
+            head_f1,
+            hand_f1,
+            lr_log,
+        )
+
+        if early_stop_patience > 0 and epochs_without_improvement >= early_stop_patience:
+            logger.info(
+                "Early stopping at epoch %d after %d epochs without improvement on %s.",
+                epoch,
+                epochs_without_improvement,
+                selection_metric,
+            )
+            break
 
     writer.flush()
     writer.close()

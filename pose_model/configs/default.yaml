@@ -5,7 +5,7 @@ hand_dir: hand_pose
 sequence_length: 16
 overlap: true  # use sliding window with stride 1 to enlarge samples
 train_ratio: 0.7
-val_ratio: 0.15
+val_ratio: 0.2
 seed: 42
 image_size: 128
 hand_roi:
