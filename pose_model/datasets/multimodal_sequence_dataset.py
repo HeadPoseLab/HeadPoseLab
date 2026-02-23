@@ -54,6 +54,7 @@ class MultiPoseSequenceDataset(Dataset):
         hand_roi_expand: float = 1.6,
         hand_roi_min_scale: float = 0.2,
         augment_cfg: dict | None = None,
+        load_images: bool = True,
     ):
         super().__init__()
         self.data_root = Path(data_root)
@@ -73,7 +74,8 @@ class MultiPoseSequenceDataset(Dataset):
         self.hand_roi_expand = float(hand_roi_expand)
         self.hand_roi_min_scale = float(hand_roi_min_scale)
         self.augment_cfg = augment_cfg or {}
-        self.augment_enabled = bool(self.augment_cfg.get("enabled", False)) and self.mode == "train"
+        self.load_images = bool(load_images)
+        self.augment_enabled = bool(self.augment_cfg.get("enabled", False)) and self.mode == "train" and self.load_images
 
         if not self.data_root.exists():
             raise FileNotFoundError(f"data_root not found: {self.data_root}")
@@ -558,7 +560,10 @@ class MultiPoseSequenceDataset(Dataset):
         head_coords_out = [list(coord) for coord in head_coords]
         hand_coords_out = [list(coord) for coord in hand_coords]
 
-        if self.augment_enabled and self.use_default_transform:
+        if not self.load_images:
+            head_images_tensor = torch.zeros(self.sequence_length, 3, 1, 1, dtype=torch.float32)
+            hand_images_tensor = torch.zeros(self.sequence_length, 3, 1, 1, dtype=torch.float32)
+        elif self.augment_enabled and self.use_default_transform:
             aug_state = self._sample_augment_state()
             head_images = [self._apply_seq_augment(Image.open(path).convert("RGB"), aug_state) for path in head_paths]
             hand_images = []
@@ -572,6 +577,8 @@ class MultiPoseSequenceDataset(Dataset):
                 hand_labels_out = self._swap_left_right_labels(hand_labels_out)
             head_coords_out = [self._augment_head_coord(coord, aug_state) for coord in head_coords_out]
             hand_coords_out = [self._augment_hand_coord(coord, aug_state) for coord in hand_coords_out]
+            head_images_tensor = torch.stack(head_images, dim=0)
+            hand_images_tensor = torch.stack(hand_images, dim=0)
         else:
             head_images = [self.transform(Image.open(path).convert("RGB")) for path in head_paths]
             hand_images = []
@@ -580,8 +587,9 @@ class MultiPoseSequenceDataset(Dataset):
                 if self.hand_roi_enabled:
                     img = self._crop_hand_roi(img, coords)
                 hand_images.append(self.transform(img))
-        head_images_tensor = torch.stack(head_images, dim=0)
-        hand_images_tensor = torch.stack(hand_images, dim=0)
+            head_images_tensor = torch.stack(head_images, dim=0)
+            hand_images_tensor = torch.stack(hand_images, dim=0)
+
         head_labels_tensor = torch.tensor(head_labels_out, dtype=torch.long)
         hand_labels_tensor = torch.tensor(hand_labels_out, dtype=torch.long)
         head_coords_tensor = torch.tensor(head_coords_out, dtype=torch.float32)

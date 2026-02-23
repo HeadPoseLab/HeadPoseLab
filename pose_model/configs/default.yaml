@@ -23,6 +23,7 @@ sampler:
 
 # Model
 model:
+  architecture: multi_task_visual
   backbone: hybrid_cnn_resnet  # hybrid_cnn_resnet
   resnet_variant: resnet50
   cnn_branch_channels: [32, 64, 128]

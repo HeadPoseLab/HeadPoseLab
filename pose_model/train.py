@@ -20,7 +20,7 @@ from pose_model.datasets.multimodal_sequence_dataset import (
     HEAD_NUM_CLASSES,
     HAND_NUM_CLASSES,
 )
-from pose_model.models.multi_task_model import MultiTaskPoseModel
+from pose_model.models.model_factory import build_pose_model, collect_backbone_modules, model_requires_images
 from pose_model.utils.logger import get_logger
 from pose_model.utils.losses import FocalLoss
 from pose_model.utils.metrics import sequence_accuracy, sequence_f1
@@ -65,6 +65,7 @@ def build_dataset(cfg, mode: str, logger):
         sampler_cfg = cfg.get("sampler", {})
         hand_roi_cfg = cfg.get("hand_roi", {})
         augment_cfg = cfg.get("augment", {})
+        load_images = model_requires_images(cfg)
         dataset = MultiPoseSequenceDataset(
             data_root=cfg["data_root"],
             mode=mode,
@@ -82,6 +83,7 @@ def build_dataset(cfg, mode: str, logger):
             hand_roi_expand=hand_roi_cfg.get("expand", 1.6),
             hand_roi_min_scale=hand_roi_cfg.get("min_scale", 0.2),
             augment_cfg=augment_cfg,
+            load_images=load_images,
         )
         return dataset
     except Exception as exc:  # noqa: BLE001
@@ -141,10 +143,7 @@ def _apply_freeze_stages(module, freeze_stages: int):
 
 
 def _set_backbone_trainable(model, trainable: bool, freeze_stages: int):
-    backbones = []
-    for backbone in (model.backbone_head, model.backbone_hand):
-        if backbone not in backbones:
-            backbones.append(backbone)
+    backbones = collect_backbone_modules(model)
     for backbone in backbones:
         _set_module_requires_grad(backbone, trainable)
         if trainable and freeze_stages is not None and freeze_stages >= 0:
@@ -154,7 +153,7 @@ def _set_backbone_trainable(model, trainable: bool, freeze_stages: int):
 def build_optimizer(model, cfg):
     base_lr = cfg["train"]["lr"]
     backbone_lr_scale = cfg["train"].get("backbone_lr_scale", 0.1)
-    backbone_modules = {model.backbone_head, model.backbone_hand}
+    backbone_modules = set(collect_backbone_modules(model))
     backbone_params = [p for m in backbone_modules for p in m.parameters() if p.requires_grad]
     backbone_param_ids = {id(p) for p in backbone_params}
     other_params = [p for p in model.parameters() if p.requires_grad and id(p) not in backbone_param_ids]
@@ -294,49 +293,8 @@ def main():
     class_weights_head = compute_class_weights(head_counts, cfg["loss"], device)
     class_weights_hand = compute_class_weights(hand_counts, cfg["loss"], device)
 
-    model = MultiTaskPoseModel(
-        backbone=cfg["model"]["backbone"],
-        feature_dim=cfg["model"]["feature_dim"],
-        temporal_encoder=cfg["model"].get("temporal_encoder", "transformer"),
-        head_temporal_encoder=cfg["model"].get("head_temporal_encoder", None),
-        hand_temporal_encoder=cfg["model"].get("hand_temporal_encoder", None),
-        tcn_channels=cfg["model"].get("tcn_channels", None),
-        tcn_kernel=cfg["model"].get("tcn_kernel", 3),
-        tcn_dilations=cfg["model"].get("tcn_dilations", None),
-        tcn_dropout=cfg["model"].get("tcn_dropout", 0.2),
-        head_tcn_channels=cfg["model"].get("head_tcn_channels", None),
-        hand_tcn_channels=cfg["model"].get("hand_tcn_channels", None),
-        head_tcn_kernel=cfg["model"].get("head_tcn_kernel", None),
-        hand_tcn_kernel=cfg["model"].get("hand_tcn_kernel", None),
-        head_tcn_dilations=cfg["model"].get("head_tcn_dilations", None),
-        hand_tcn_dilations=cfg["model"].get("hand_tcn_dilations", None),
-        head_tcn_dropout=cfg["model"].get("head_tcn_dropout", None),
-        hand_tcn_dropout=cfg["model"].get("hand_tcn_dropout", None),
-        transformer_cfg=cfg["model"].get("transformer", None),
-        head_transformer_cfg=cfg["model"].get("head_transformer", None),
-        hand_transformer_cfg=cfg["model"].get("hand_transformer", None),
-        shared_backbone=cfg["model"].get("shared_backbone", False),
-        shared_temporal=cfg["model"].get("shared_temporal", False),
-        adapter_enabled=cfg["model"].get("adapter", {}).get("enabled", False),
-        adapter_dim=cfg["model"].get("adapter", {}).get("dim", None),
-        adapter_dropout=cfg["model"].get("adapter", {}).get("dropout", 0.1),
-        keypoint_fusion_enabled=cfg["model"].get("keypoint_fusion", {}).get("enabled", False),
-        keypoint_hidden_dim=cfg["model"].get("keypoint_fusion", {}).get("hidden_dim", None),
-        keypoint_dropout=cfg["model"].get("keypoint_fusion", {}).get("dropout", 0.1),
-        head_use_attn_pool=cfg["model"].get("head_attention_pool", False),
-        head_attn_pool_dropout=cfg["model"].get("head_attention_dropout", 0.1),
-        hand_use_attn_pool=cfg["model"].get("hand_attention_pool", False),
-        hand_attn_pool_dropout=cfg["model"].get("hand_attention_dropout", 0.1),
-        num_head_classes=cfg["model"].get("num_head_classes", HEAD_NUM_CLASSES),
-        num_hand_classes=cfg["model"].get("num_hand_classes", HAND_NUM_CLASSES),
-        freeze_backbone=cfg["model"]["freeze_backbone"],
-        freeze_stages=cfg["model"].get("freeze_stages", -1),
-        pretrained=cfg["model"].get("pretrained", True),
-        resnet_variant=cfg["model"].get("resnet_variant", "resnet50"),
-        cnn_branch_channels=cfg["model"].get("cnn_branch_channels", None),
-        fusion=cfg["model"].get("fusion", "concat"),
-        fusion_dropout=cfg["model"].get("fusion_dropout", 0.0),
-    ).to(device)
+    model, model_arch = build_pose_model(cfg, device=device)
+    logger.info("Model architecture: %s", model_arch)
 
     writer = SummaryWriter(log_dir=cfg["train"].get("log_dir", "runs"))
     try:
@@ -347,8 +305,14 @@ def main():
         example_hand = torch.zeros(
             1, cfg["sequence_length"], 3, cfg["image_size"], cfg["image_size"], device=device, dtype=torch.float32
         )
+        example_head_coords = torch.zeros(
+            1, cfg["sequence_length"], 2, device=device, dtype=torch.float32
+        )
+        example_hand_coords = torch.zeros(
+            1, cfg["sequence_length"], 4, device=device, dtype=torch.float32
+        )
         with torch.no_grad():
-            writer.add_graph(model, (example_head, example_hand))
+            writer.add_graph(model, (example_head, example_hand, example_head_coords, example_hand_coords))
         model.train()
     except Exception as exc:  # noqa: BLE001
         logger.warning("Skipping graph export to TensorBoard: %s", exc)

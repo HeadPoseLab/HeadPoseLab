@@ -15,7 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 from pose_model.datasets.multimodal_sequence_dataset import HEAD_NUM_CLASSES, HAND_NUM_CLASSES
-from pose_model.models.multi_task_model import MultiTaskPoseModel
+from pose_model.models.model_factory import build_pose_model, model_requires_images
 
 LABEL_MAP = {0: "正", 1: "下", 2: "左", 3: "右", 4: "歪"}
 
@@ -101,13 +101,15 @@ def _hand_coords_from_entry(entry: dict):
     ]
 
 
-def prepare_aligned_sequences(head_dir: Path, hand_dir: Path, seq_len: int, image_size: int):
-    transform = transforms.Compose(
-        [
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-        ]
-    )
+def prepare_aligned_sequences(head_dir: Path, hand_dir: Path, seq_len: int, image_size: int, load_images: bool):
+    transform = None
+    if load_images:
+        transform = transforms.Compose(
+            [
+                transforms.Resize((image_size, image_size)),
+                transforms.ToTensor(),
+            ]
+        )
 
     head_labels_path = head_dir.parent / "labels.json"
     hand_labels_path = hand_dir.parent / "labels.json"
@@ -134,16 +136,37 @@ def prepare_aligned_sequences(head_dir: Path, hand_dir: Path, seq_len: int, imag
         head_coords = [[0.0, 0.0] for _ in selected]
         hand_coords = [[0.0, 0.0, 0.0, 0.0] for _ in selected]
 
-    head_images = [transform(Image.open(p).convert("RGB")) for p in head_paths]
-    hand_images = [transform(Image.open(p).convert("RGB")) for p in hand_paths]
+    head_images = [transform(Image.open(p).convert("RGB")) for p in head_paths] if load_images else None
+    hand_images = [transform(Image.open(p).convert("RGB")) for p in hand_paths] if load_images else None
     return (
-        torch.stack(head_images, dim=0),
-        torch.stack(hand_images, dim=0),
+        torch.stack(head_images, dim=0) if head_images is not None else None,
+        torch.stack(hand_images, dim=0) if hand_images is not None else None,
         torch.tensor(head_coords, dtype=torch.float32),
         torch.tensor(hand_coords, dtype=torch.float32),
         head_paths,
         hand_paths,
     )
+
+
+def _majority_smooth(preds: list[int], window: int) -> list[int]:
+    if window <= 1 or len(preds) <= 2:
+        return preds
+    window = max(1, int(window))
+    if window % 2 == 0:
+        window += 1
+    half = window // 2
+    out: list[int] = []
+    for i in range(len(preds)):
+        l = max(0, i - half)
+        r = min(len(preds), i + half + 1)
+        span = preds[l:r]
+        counts = {}
+        for x in span:
+            counts[x] = counts.get(x, 0) + 1
+        # deterministic tie-break by class id
+        best = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+        out.append(best)
+    return out
 
 
 def main():
@@ -159,49 +182,7 @@ def main():
         hand_unknown_class = int(inference_cfg.get("hand_unknown_class", HAND_NUM_CLASSES))
     hand_unknown_index = max(0, min(hand_unknown_class - 1, HAND_NUM_CLASSES - 1))
 
-    model = MultiTaskPoseModel(
-        backbone=cfg["model"]["backbone"],
-        feature_dim=cfg["model"]["feature_dim"],
-        temporal_encoder=cfg["model"].get("temporal_encoder", "transformer"),
-        head_temporal_encoder=cfg["model"].get("head_temporal_encoder", None),
-        hand_temporal_encoder=cfg["model"].get("hand_temporal_encoder", None),
-        tcn_channels=cfg["model"].get("tcn_channels", None),
-        tcn_kernel=cfg["model"].get("tcn_kernel", 3),
-        tcn_dilations=cfg["model"].get("tcn_dilations", None),
-        tcn_dropout=cfg["model"].get("tcn_dropout", 0.2),
-        head_tcn_channels=cfg["model"].get("head_tcn_channels", None),
-        hand_tcn_channels=cfg["model"].get("hand_tcn_channels", None),
-        head_tcn_kernel=cfg["model"].get("head_tcn_kernel", None),
-        hand_tcn_kernel=cfg["model"].get("hand_tcn_kernel", None),
-        head_tcn_dilations=cfg["model"].get("head_tcn_dilations", None),
-        hand_tcn_dilations=cfg["model"].get("hand_tcn_dilations", None),
-        head_tcn_dropout=cfg["model"].get("head_tcn_dropout", None),
-        hand_tcn_dropout=cfg["model"].get("hand_tcn_dropout", None),
-        transformer_cfg=cfg["model"].get("transformer", None),
-        head_transformer_cfg=cfg["model"].get("head_transformer", None),
-        hand_transformer_cfg=cfg["model"].get("hand_transformer", None),
-        shared_backbone=cfg["model"].get("shared_backbone", False),
-        shared_temporal=cfg["model"].get("shared_temporal", False),
-        adapter_enabled=cfg["model"].get("adapter", {}).get("enabled", False),
-        adapter_dim=cfg["model"].get("adapter", {}).get("dim", None),
-        adapter_dropout=cfg["model"].get("adapter", {}).get("dropout", 0.1),
-        keypoint_fusion_enabled=cfg["model"].get("keypoint_fusion", {}).get("enabled", False),
-        keypoint_hidden_dim=cfg["model"].get("keypoint_fusion", {}).get("hidden_dim", None),
-        keypoint_dropout=cfg["model"].get("keypoint_fusion", {}).get("dropout", 0.1),
-        head_use_attn_pool=cfg["model"].get("head_attention_pool", False),
-        head_attn_pool_dropout=cfg["model"].get("head_attention_dropout", 0.1),
-        hand_use_attn_pool=cfg["model"].get("hand_attention_pool", False),
-        hand_attn_pool_dropout=cfg["model"].get("hand_attention_dropout", 0.1),
-        num_head_classes=cfg["model"].get("num_head_classes", HEAD_NUM_CLASSES),
-        num_hand_classes=cfg["model"].get("num_hand_classes", HAND_NUM_CLASSES),
-        freeze_backbone=cfg["model"]["freeze_backbone"],
-        freeze_stages=cfg["model"].get("freeze_stages", -1),
-        pretrained=cfg["model"].get("pretrained", True),
-        resnet_variant=cfg["model"].get("resnet_variant", "resnet50"),
-        cnn_branch_channels=cfg["model"].get("cnn_branch_channels", None),
-        fusion=cfg["model"].get("fusion", "concat"),
-        fusion_dropout=cfg["model"].get("fusion_dropout", 0.0),
-    ).to(device)
+    model, model_arch = build_pose_model(cfg, device=device)
 
     checkpoint = torch.load(args.checkpoint, map_location=device)
     model.load_state_dict(checkpoint["model_state"])
@@ -210,11 +191,13 @@ def main():
     person_dir = Path(args.person_dir)
     head_images_dir = person_dir / cfg.get("head_dir", "head_pose") / "images"
     hand_images_dir = person_dir / cfg.get("hand_dir", "hand_pose") / "images"
+    load_images = model_requires_images(cfg)
     head_tensor, hand_tensor, head_coords, hand_coords, head_paths, hand_paths = prepare_aligned_sequences(
-        head_images_dir, hand_images_dir, cfg["sequence_length"], cfg["image_size"]
+        head_images_dir, hand_images_dir, cfg["sequence_length"], cfg["image_size"], load_images=load_images
     )
-    head_tensor = head_tensor.unsqueeze(0).to(device)
-    hand_tensor = hand_tensor.unsqueeze(0).to(device)
+    if head_tensor is not None and hand_tensor is not None:
+        head_tensor = head_tensor.unsqueeze(0).to(device)
+        hand_tensor = hand_tensor.unsqueeze(0).to(device)
     head_coords = head_coords.unsqueeze(0).to(device)
     hand_coords = hand_coords.unsqueeze(0).to(device)
 
@@ -227,6 +210,12 @@ def main():
             hand_preds_tensor = hand_preds_tensor.clone()
             hand_preds_tensor[hand_max_probs < hand_unknown_threshold] = hand_unknown_index
         hand_preds = hand_preds_tensor.squeeze(0).cpu().tolist()
+
+    smooth_cfg = inference_cfg.get("smoothing", {})
+    if smooth_cfg.get("enabled", False):
+        window = int(smooth_cfg.get("window", 5))
+        head_preds = _majority_smooth(head_preds, window)
+        hand_preds = _majority_smooth(hand_preds, window)
 
     print("Frame-level predictions:")
     for head_path, hand_path, head_pred, hand_pred in zip(head_paths, hand_paths, head_preds, hand_preds):

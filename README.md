@@ -1,6 +1,10 @@
 # HeadPoseLab 训练模块
 
-基于 README 规划的 CNN + LSTM 训练脚手架，负责读取已标注的头部序列数据并训练 5 类姿态识别模型（1=正，2=下，3=左，4=右，5=歪）。
+项目当前支持两条可切换架构：
+- `multi_task_visual`：视觉主导（CNN/ResNet + 时序编码器）
+- `geometry_first`：几何主导（关键点时序特征 + 轻量 GRU，可选视觉专家）
+
+目标类别为 5 类头姿态（1=正，2=下，3=左，4=右，5=歪）与 4 类手势（移除原始手势类 2 后映射为 1..4）。
 
 ## 目录结构
 ```
@@ -51,6 +55,11 @@ python train.py --config configs/default.yaml
 ```bash
 python train.py --config configs/exp_head_priority.yaml
 ```
+
+第一性重构实验（几何优先）：
+```bash
+python train.py --config configs/exp_geometry_first.yaml
+```
 训练会保存：
 - `best_head_f1.pt`（主模型）
 - `best_val_loss.pt`
@@ -62,10 +71,12 @@ cd pose_model
 .\.venv\Scripts\Activate
 python eval.py --config configs/default.yaml --checkpoint checkpoints/exp_roi_tcn_attn/best.pt
 python eval.py --config configs/exp_head_priority.yaml --checkpoint checkpoints/exp_head_priority/best_head_f1.pt
+python eval.py --config configs/exp_geometry_first.yaml --checkpoint checkpoints/exp_geometry_first/best_head_f1.pt
 ```
 
 ## 推理示例
 ```bash
 python inference_demo.py --config configs/default.yaml --checkpoint checkpoints/exp_roi_tcn_attn/best.pt --person_dir path/to/person_dir
+python inference_demo.py --config configs/exp_geometry_first.yaml --checkpoint checkpoints/exp_geometry_first/best_head_f1.pt --person_dir path/to/person_dir
 ```
-`person_dir` 需包含 `head_pose/images`、`hand_pose/images`，建议同时包含对应 `labels.json` 以启用关键点融合推理。
+`person_dir` 需包含 `head_pose/images`、`hand_pose/images`。当 `person_dir` 同时包含对应 `labels.json` 时，`geometry_first` 可直接使用关键点特征并启用时序平滑推理。

@@ -7,15 +7,15 @@ overlap: true
 train_ratio: 0.7
 val_ratio: 0.2
 seed: 42
-image_size: 160
+image_size: 128
 hand_roi:
   enabled: true
   expand: 1.6
   min_scale: 0.2
 
-# Data augmentation (train mode only, sequence-consistent)
+# Optional image augmentation (active only when model requires images)
 augment:
-  enabled: true
+  enabled: false
   hflip_p: 0.5
   color_jitter:
     brightness: 0.2
@@ -43,63 +43,36 @@ augment:
     value: 0.0
 
 # Dataloader
-batch_size: 8
+batch_size: 16
 num_workers: 4
 sampler:
   balanced: true
-  sample_weight_head: 0.75
-  sample_weight_hand: 0.25
+  sample_weight_head: 0.8
+  sample_weight_hand: 0.2
 
-# Model
+# Model (first-principles: geometry-first)
 model:
-  architecture: multi_task_visual
-  backbone: hybrid_cnn_resnet
-  resnet_variant: resnet50
-  cnn_branch_channels: [32, 64, 128]
-  feature_dim: 320
-  fusion: concat
-  fusion_dropout: 0.1
-  shared_backbone: false
-  shared_temporal: false
-  adapter:
-    enabled: true
-    dim: 320
-    dropout: 0.1
-  keypoint_fusion:
-    enabled: true
-    hidden_dim: 160
-    dropout: 0.1
+  architecture: geometry_first
   num_head_classes: 5
   num_hand_classes: 4
-  temporal_encoder: transformer
-  head_temporal_encoder: transformer
-  hand_temporal_encoder: tcn
-  tcn_channels: [192, 192]
-  tcn_kernel: 3
-  tcn_dilations: [1, 2]
-  tcn_dropout: 0.2
-  hand_tcn_channels: [128, 128]
-  hand_tcn_kernel: 3
-  hand_tcn_dilations: [1, 2]
-  hand_tcn_dropout: 0.2
+  geom_dim: 128
+  geometry_temporal:
+    hidden_dim: 128
+    num_layers: 2
+    dropout: 0.1
+    bidirectional: false
   head_attention_pool: true
   head_attention_dropout: 0.1
   hand_attention_pool: true
   hand_attention_dropout: 0.1
-  transformer:
-    input_dim: null
-    num_layers: 3
-    nhead: 8
-    dim_feedforward: 1024
+  appearance_expert:
+    enabled: false
+    backbone: simple_cnn
+    feature_dim: 96
+    shared_backbone: true
     dropout: 0.1
-    activation: relu
-    use_positional_encoding: true
-    pos_encoding: learned
-    pre_norm: true
-    max_len: 256
   freeze_backbone: false
   freeze_stages: -1
-  pretrained: true
 
 # Loss
 loss:
@@ -110,24 +83,24 @@ loss:
   focal_gamma: 2.0
   head_focal_gamma: 1.5
   hand_focal_gamma: 2.0
-  head_weight: 1.6
-  hand_weight: 0.6
+  head_weight: 1.8
+  hand_weight: 0.5
 
 # Optimization
 train:
   epochs: 120
-  lr: 0.0003
+  lr: 0.0005
   backbone_lr_scale: 0.2
   weight_decay: 0.0005
   grad_clip: 1.0
   device: auto
-  save_dir: ./checkpoints/exp_head_priority
+  save_dir: ./checkpoints/exp_geometry_first
   log_interval: 10
-  log_dir: ./runs/exp_head_priority
-  freeze_backbone_epochs: 2
+  log_dir: ./runs/exp_geometry_first
+  freeze_backbone_epochs: 0
   selection_metric: head_f1
   selection_mode: max
-  early_stop_patience: 20
+  early_stop_patience: 25
   scheduler:
     enabled: true
     type: warmup_cosine
@@ -136,7 +109,7 @@ train:
 
 # Evaluation
 eval:
-  checkpoint: ./checkpoints/exp_head_priority/best_head_f1.pt
+  checkpoint: ./checkpoints/exp_geometry_first/best_head_f1.pt
   hand_unknown_threshold: 0.0
   hand_unknown_class: 4
 
@@ -144,3 +117,6 @@ eval:
 inference:
   hand_unknown_threshold: 0.0
   hand_unknown_class: 4
+  smoothing:
+    enabled: true
+    window: 5

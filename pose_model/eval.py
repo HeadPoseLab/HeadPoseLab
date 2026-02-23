@@ -17,7 +17,7 @@ from pose_model.datasets.multimodal_sequence_dataset import (
     HEAD_NUM_CLASSES,
     HAND_NUM_CLASSES,
 )
-from pose_model.models.multi_task_model import MultiTaskPoseModel
+from pose_model.models.model_factory import build_pose_model, model_requires_images
 from pose_model.utils.logger import get_logger
 from pose_model.utils.losses import FocalLoss
 from pose_model.utils.metrics import confusion, per_class_accuracy, sequence_accuracy, sequence_f1
@@ -184,6 +184,7 @@ def main():
     sampler_cfg = cfg.get("sampler", {})
     hand_roi_cfg = cfg.get("hand_roi", {})
     augment_cfg = cfg.get("augment", {})
+    load_images = model_requires_images(cfg)
     dataset = MultiPoseSequenceDataset(
         data_root=cfg["data_root"],
         mode="test",
@@ -201,56 +202,16 @@ def main():
         hand_roi_expand=hand_roi_cfg.get("expand", 1.6),
         hand_roi_min_scale=hand_roi_cfg.get("min_scale", 0.2),
         augment_cfg=augment_cfg,
+        load_images=load_images,
     )
     loader = DataLoader(dataset, batch_size=cfg["batch_size"], shuffle=False, num_workers=cfg["num_workers"])
 
-    model = MultiTaskPoseModel(
-        backbone=cfg["model"]["backbone"],
-        feature_dim=cfg["model"]["feature_dim"],
-        temporal_encoder=cfg["model"].get("temporal_encoder", "transformer"),
-        head_temporal_encoder=cfg["model"].get("head_temporal_encoder", None),
-        hand_temporal_encoder=cfg["model"].get("hand_temporal_encoder", None),
-        tcn_channels=cfg["model"].get("tcn_channels", None),
-        tcn_kernel=cfg["model"].get("tcn_kernel", 3),
-        tcn_dilations=cfg["model"].get("tcn_dilations", None),
-        tcn_dropout=cfg["model"].get("tcn_dropout", 0.2),
-        head_tcn_channels=cfg["model"].get("head_tcn_channels", None),
-        hand_tcn_channels=cfg["model"].get("hand_tcn_channels", None),
-        head_tcn_kernel=cfg["model"].get("head_tcn_kernel", None),
-        hand_tcn_kernel=cfg["model"].get("hand_tcn_kernel", None),
-        head_tcn_dilations=cfg["model"].get("head_tcn_dilations", None),
-        hand_tcn_dilations=cfg["model"].get("hand_tcn_dilations", None),
-        head_tcn_dropout=cfg["model"].get("head_tcn_dropout", None),
-        hand_tcn_dropout=cfg["model"].get("hand_tcn_dropout", None),
-        transformer_cfg=cfg["model"].get("transformer", None),
-        head_transformer_cfg=cfg["model"].get("head_transformer", None),
-        hand_transformer_cfg=cfg["model"].get("hand_transformer", None),
-        shared_backbone=cfg["model"].get("shared_backbone", False),
-        shared_temporal=cfg["model"].get("shared_temporal", False),
-        adapter_enabled=cfg["model"].get("adapter", {}).get("enabled", False),
-        adapter_dim=cfg["model"].get("adapter", {}).get("dim", None),
-        adapter_dropout=cfg["model"].get("adapter", {}).get("dropout", 0.1),
-        keypoint_fusion_enabled=cfg["model"].get("keypoint_fusion", {}).get("enabled", False),
-        keypoint_hidden_dim=cfg["model"].get("keypoint_fusion", {}).get("hidden_dim", None),
-        keypoint_dropout=cfg["model"].get("keypoint_fusion", {}).get("dropout", 0.1),
-        head_use_attn_pool=cfg["model"].get("head_attention_pool", False),
-        head_attn_pool_dropout=cfg["model"].get("head_attention_dropout", 0.1),
-        hand_use_attn_pool=cfg["model"].get("hand_attention_pool", False),
-        hand_attn_pool_dropout=cfg["model"].get("hand_attention_dropout", 0.1),
-        num_head_classes=cfg["model"].get("num_head_classes", HEAD_NUM_CLASSES),
-        num_hand_classes=cfg["model"].get("num_hand_classes", HAND_NUM_CLASSES),
-        freeze_backbone=cfg["model"]["freeze_backbone"],
-        freeze_stages=cfg["model"].get("freeze_stages", -1),
-        pretrained=cfg["model"].get("pretrained", True),
-        resnet_variant=cfg["model"].get("resnet_variant", "resnet50"),
-        cnn_branch_channels=cfg["model"].get("cnn_branch_channels", None),
-        fusion=cfg["model"].get("fusion", "concat"),
-        fusion_dropout=cfg["model"].get("fusion_dropout", 0.0),
-    ).to(device)
+    model, model_arch = build_pose_model(cfg, device=device)
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint["model_state"])
     logger.info("Loaded checkpoint from %s", checkpoint_path)
+    logger.info("Model architecture: %s", model_arch)
     if hand_unknown_threshold and hand_unknown_threshold > 0:
         logger.info(
             "Applying hand unknown threshold %.3f -> class %d",
